@@ -3,6 +3,7 @@ from datetime import date
 
 import pytest
 
+from ntl.core.errores import MedicionImposible
 from ntl.radianza.extraccion import extract_radiance_matrix, process_image
 
 
@@ -34,27 +35,31 @@ class TestProcessImage:
         )
         assert result is None
 
-    def test_returns_none_when_no_valid_coordinates(self, sample_hdf5_path):
-        # Coordinates outside 10x10 image
-        coords = [(100, 100), (101, 101)]
-        result = process_image(
-            sample_hdf5_path,
-            coords,
-            date(2024, 1, 1),
-            "Test",
-            delete_file=False,
-        )
-        assert result is None
+    def test_lanza_si_ninguna_coordenada_cae_en_la_reticula(self, sample_hdf5_path):
+        """
+        La tabla de cobertura y la imagen no cuadran: eso no es «no hay
+        medición», es una incoherencia, y devolverla como None la confundía con
+        una noche nublada.
+        """
+        coords = [(100, 100), (101, 101)]  # fuera de la imagen de 10x10
+        with pytest.raises(MedicionImposible, match="ninguna coordenada"):
+            process_image(
+                sample_hdf5_path,
+                coords,
+                date(2024, 1, 1),
+                "Test",
+                delete_file=False,
+            )
 
-    def test_returns_none_when_empty_coordinates(self, sample_hdf5_path):
-        result = process_image(
-            sample_hdf5_path,
-            [],
-            date(2024, 1, 1),
-            "Test",
-            delete_file=False,
-        )
-        assert result is None
+    def test_lanza_si_la_cobertura_viene_vacia(self, sample_hdf5_path):
+        with pytest.raises(MedicionImposible):
+            process_image(
+                sample_hdf5_path,
+                [],
+                date(2024, 1, 1),
+                "Test",
+                delete_file=False,
+            )
 
 
 class TestExtractRadianceMatrix:
@@ -87,15 +92,15 @@ class TestExtractRadianceMatrix:
         )
         assert result is None
 
-    def test_returns_none_when_no_valid_coordinates(self, sample_hdf5_path):
+    def test_lanza_si_ninguna_coordenada_cae_en_la_reticula(self, sample_hdf5_path):
         coords = [(100, 100), (101, 101)]
-        result = extract_radiance_matrix(
-            sample_hdf5_path,
-            coords,
-            date(2024, 1, 1),
-            "Test",
-        )
-        assert result is None
+        with pytest.raises(MedicionImposible):
+            extract_radiance_matrix(
+                sample_hdf5_path,
+                coords,
+                date(2024, 1, 1),
+                "Test",
+            )
 
 
 class TestPonderacionPorCobertura:
