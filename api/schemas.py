@@ -28,6 +28,15 @@ class JobStatus(BaseModel):
     finished_at: datetime | None = Field(None, description="When the job finished (if completed/failed)")
     error: str | None = Field(None, description="Error message if status is failed")
     total_results: int = Field(0, description="Number of measurement records when completed")
+    fallos: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "Mediciones que no se pudieron calcular por un fallo, con municipio, "
+            "fecha, tipo y mensaje. Un job puede terminar 'completed' y aun así "
+            "traer filas de menos: si esta lista no está vacía, faltan mediciones "
+            "y no es porque no hubiera imagen."
+        ),
+    )
 
 
 class JobResult(BaseModel):

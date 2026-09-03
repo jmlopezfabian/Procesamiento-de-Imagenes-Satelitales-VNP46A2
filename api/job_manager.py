@@ -23,6 +23,9 @@ class JobState:
         self.error: str | None = None
         self.results: list[dict] = []
         self.total_results: int = 0
+        # Mediciones que fallaron. Un job "completed" con filas de menos y sin
+        # este campo dice que todo fue bien cuando no lo fue.
+        self.fallos: list[dict] = []
         self.task: asyncio.Task | None = None
 
 
@@ -80,6 +83,7 @@ async def run_job(
             on_progress=on_progress,
         )
         state.results = df.to_dict(orient="records") if not df.empty else []
+        state.fallos = sat.fallos
         state.status = "completed"
         state.total_results = len(state.results)
     except asyncio.CancelledError:

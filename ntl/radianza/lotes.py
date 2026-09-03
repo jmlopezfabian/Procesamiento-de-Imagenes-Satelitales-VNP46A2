@@ -4,7 +4,8 @@ import os
 import glob
 from typing import Callable
 
-from ..core.config import PIXELES_MUNICIPIOS, TEMP_DIR, data_path, temp_path
+from ..core.config import (MAX_FECHAS_CONCURRENTES, PIXELES_MUNICIPIOS,
+                           TEMP_DIR, data_path, temp_path)
 from ..core.utils import normalize_municipio, parse_date, load_coord_data
 from ..core.downloader import find_file_async, download_file_async
 from .extraccion import process_image_mosaico
@@ -48,43 +49,6 @@ def save_progress(df, municipio, chunk_number=None):
         print(f"❌ Error guardando progreso: {e}")
         return None
 
-async def process_chunks(satellite_instance, fechas, chunks, session, municipio):
-    """Procesa las fechas en chunks de forma asíncrona con guardado progresivo"""
-    results = []
-    fechas_chunks = chunk_list(fechas, chunks)
-    
-    for i, chunk_fechas in enumerate(fechas_chunks):
-        print(f"Procesando chunk {i+1}/{len(fechas_chunks)} con {len(chunk_fechas)} fechas")
-        
-        try:
-            # Procesar el chunk actual de forma asíncrona
-            tasks = [satellite_instance.get_measures(session, f) for f in chunk_fechas]
-            chunk_results = []
-            
-            for result in asyncio.as_completed(tasks):
-                datos = await result
-                if datos:
-                    chunk_results.append(datos.model_dump())
-            
-            # Agregar resultados del chunk actual
-            results.extend(chunk_results)
-            print(f"Chunk {i+1} completado. Resultados obtenidos: {len(chunk_results)}")
-            
-            # Guardar progreso después de cada chunk
-            if chunk_results:
-                temp_df = pd.DataFrame(results)
-                save_progress(temp_df, municipio, i+1)
-            
-        except Exception as e:
-            print(f"❌ Error procesando chunk {i+1}: {e}")
-            # Guardar progreso hasta el momento en caso de error
-            if results:
-                temp_df = pd.DataFrame(results)
-                save_progress(temp_df, municipio, f"error_chunk_{i+1}")
-            raise e
-    
-    return results
-
 class SatelliteImagesAsync:
     """
     Class for get the measures of the satellite images for multiple municipalities
@@ -103,6 +67,10 @@ class SatelliteImagesAsync:
         self.municipios = [normalize_municipio(m) for m in municipios]
         self.coord_data_dict = {}
         self.cache_h5_files = {}  # Cache para archivos H5 ya descargados
+        # Mediciones que no se pudieron calcular por un fallo, no por falta de
+        # datos. Una fila que no está no dice por qué no está; sin esta lista,
+        # un municipio que revienta y una noche nublada dejan el mismo hueco.
+        self.fallos = []
         
         # Cargar datos de coordenadas para todos los municipios
         for municipio in self.municipios:
@@ -148,7 +116,7 @@ class SatelliteImagesAsync:
         except Exception as e:
             print(f"Error eliminando archivo {ruta}: {e}")
 
-    async def get_measures_for_date(self, session, date_str):
+    async def get_measures_for_date(self, session, date_str, estricto=False):
         """
         Medidas de todos los municipios en una fecha.
 
@@ -200,7 +168,19 @@ class SatelliteImagesAsync:
                 else:
                     print(f"⚠️ Sin datos para: {municipio} - {date_obj}")
             except Exception as e:
-                print(f"❌ Error procesando {municipio} para {date_obj}: {e}")
+                # Se anota antes de seguir: la corrida sigue, pero la serie
+                # queda con un hueco y tiene que quedar dicho de quién y cuándo.
+                self.fallos.append({
+                    "municipio": municipio,
+                    "fecha": str(date_obj),
+                    "cuadrantes": list(cuadrantes),
+                    "tipo": type(e).__name__,
+                    "mensaje": str(e),
+                })
+                print(f"❌ Error procesando {municipio} para {date_obj}: "
+                      f"{type(e).__name__}: {e}")
+                if estricto:
+                    raise
 
             for cuadrante in cuadrantes:
                 pendientes[cuadrante] -= 1
@@ -209,11 +189,49 @@ class SatelliteImagesAsync:
 
         return results
 
-    async def run(self, fechas, chunks=None, save_progress_enabled=True, on_progress: Callable[[str], None] | None = None):
+    async def _medir_fecha_limitada(self, session, fecha, limite, estricto=False):
+        """
+        `get_measures_for_date` con un permiso del semáforo tomado.
+
+        El límite va por fecha y no por descarga a propósito: una fecha retiene
+        sus gránulos hasta que termina su último municipio —el contador de
+        referencias los libera al final—, así que acotar las descargas
+        simultáneas no acotaría cuántos archivos hay residentes en disco, que es
+        lo que llena el volumen.
+
+        Es un envoltorio en vez de un `async with` dentro de
+        `get_measures_for_date` para que esa siga siendo llamable tal cual, sin
+        tener que fabricarle un semáforo.
+        """
+        async with limite:
+            return await self.get_measures_for_date(session, fecha, estricto)
+
+    async def run(self, fechas, chunks=None, save_progress_enabled=True,
+                  on_progress: Callable[[str], None] | None = None,
+                  max_concurrentes: int | None = None, estricto: bool = False):
+        """
+        Procesa una lista de fechas.
+
+        `max_concurrentes` acota cuántas fechas se procesan a la vez y con ello
+        el pico de disco (ver MAX_FECHAS_CONCURRENTES en core.config). Es
+        independiente de `chunks`, que decide cada cuántas fechas se guarda
+        progreso: antes acotar el disco obligaba a pedir checkpoints que quizá
+        no se querían.
+
+        Una medición que falla no detiene la corrida: se anota en `self.fallos`
+        y se resume al terminar. `estricto=True` aborta en el primer fallo, que
+        es lo que quiere quien reconstruye una serie desde cero; quien barre
+        diez años prefiere terminar y mirar la lista.
+        """
         results = []
         import aiohttp
         total_fechas = len(fechas)
         completed_count = 0
+        # El semáforo se crea aquí y no en __init__ porque __init__ es síncrono
+        # y puede ejecutarse sin un loop corriendo.
+        limite = asyncio.Semaphore(
+            max_concurrentes if max_concurrentes is not None else MAX_FECHAS_CONCURRENTES
+        )
 
         def _report_progress():
             nonlocal completed_count
@@ -225,7 +243,8 @@ class SatelliteImagesAsync:
             async with aiohttp.ClientSession() as session:
                 if chunks is None:
                     # Procesamiento original: todas las fechas de forma asíncrona
-                    tasks = [self.get_measures_for_date(session, f) for f in fechas]
+                    tasks = [self._medir_fecha_limitada(session, f, limite, estricto)
+                             for f in fechas]
                     for result in asyncio.as_completed(tasks):
                         datos_list = await result
                         if datos_list:
@@ -240,7 +259,8 @@ class SatelliteImagesAsync:
                         
                         try:
                             # Procesar el chunk actual de forma asíncrona
-                            tasks = [self.get_measures_for_date(session, f) for f in chunk_fechas]
+                            tasks = [self._medir_fecha_limitada(session, f, limite, estricto)
+                                     for f in chunk_fechas]
                             chunk_results = []
                             
                             for result in asyncio.as_completed(tasks):
@@ -276,5 +296,32 @@ class SatelliteImagesAsync:
         finally:
             # Limpiar archivos residuales al final
             cleanup_temp_files()
-        
+            self._resumir_fallos(len(results), save_progress_enabled)
+
         return pd.DataFrame(results)
+
+    def _resumir_fallos(self, n_resultados, guardar=True):
+        """
+        Deja constancia de los huecos que no son huecos de datos.
+
+        Un resumen impreso en una terminal que luego se cierra no es evidencia,
+        así que además se escribe al lado de los resultados.
+        """
+        if not self.fallos:
+            return
+        total = n_resultados + len(self.fallos)
+        porcentaje = 100 * len(self.fallos) / total if total else 0.0
+        tipos = {}
+        for f in self.fallos:
+            tipos[f["tipo"]] = tipos.get(f["tipo"], 0) + 1
+        detalle = ", ".join(f"{n} {t}" for t, n in sorted(tipos.items()))
+        print(f"⚠️ {len(self.fallos)} de {total} mediciones fallaron "
+              f"({porcentaje:.2f}%): {detalle}. Faltan esas filas de la serie y "
+              f"no es porque no hubiera imagen. El detalle está en `.fallos`.")
+        if guardar:
+            try:
+                ruta = data_path("fallos.parquet")
+                pd.DataFrame(self.fallos).to_parquet(ruta, index=False)
+                print(f"   Detalle guardado en {ruta}")
+            except Exception as e:
+                print(f"   No se pudo guardar el detalle de fallos: {e}")

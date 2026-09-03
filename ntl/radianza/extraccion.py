@@ -6,6 +6,7 @@ from datetime import date
 from typing import Any
 
 from ..core.config import IMAGE_PATH, find_image_path
+from ..core.errores import MedicionImposible
 from ..core.lectura import leer_radianza
 from ..core.metricas import metricas_ponderadas
 from ..core.models import MedicionResultado, PiezaCuadrante
@@ -147,8 +148,8 @@ def extract_radiance_matrix_mosaico(
     """
     piezas_norm = _normalizar_piezas(piezas)
     if not piezas_norm:
-        print(f"No hay piezas de cobertura para {municipio}")
-        return None
+        raise MedicionImposible(
+            "la tabla de cobertura no trae ninguna pieza", municipio, date_obj)
 
     matrices: dict[str | None, np.ndarray] = {}
     for cuadrante, _ in piezas_norm.items():
@@ -176,8 +177,9 @@ def extract_radiance_matrix_mosaico(
 
     formas = {m.shape for m in matrices.values()}
     if len(formas) > 1:
-        print(f"Los cuadrantes de {municipio} traen retículas distintas {formas}")
-        return None
+        raise MedicionImposible(
+            f"los cuadrantes traen retículas distintas {formas} y no se pueden "
+            f"componer", municipio, date_obj)
     forma = formas.pop()
     alto, ancho = forma
     desplazamientos = _desplazamientos(list(piezas_norm), forma)
@@ -189,8 +191,9 @@ def extract_radiance_matrix_mosaico(
         if 0 <= y < alto and 0 <= x < ancho
     ]
     if not pesos_ref:
-        print(f"No se encontraron coordenadas válidas para {municipio} en {date_obj}")
-        return None
+        raise MedicionImposible(
+            "ninguna coordenada de la tabla de cobertura cae dentro de la "
+            "retícula", municipio, date_obj)
 
     cuadrantes = [c for c in piezas_norm if c]
     return {
@@ -291,6 +294,15 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
     registros parciales debe filtrarlos por `Fraccion_valida` o por
     `Cuadrantes_faltantes`, que para eso están.
 
+    `None` y excepción no son lo mismo, y esa es la distinción que sostiene la
+    serie histórica. Devuelve **None** cuando no hay medición y eso es normal:
+    ninguna imagen disponible todavía, o ningún píxel con observación válida
+    porque la noche estaba nublada. **Lanza `MedicionImposible`** cuando la tabla
+    de cobertura y las imágenes se contradicen, que no se arregla esperando a
+    mañana, y deja **propagar** cualquier otra excepción, que es un defecto.
+    Antes las tres cosas se atrapaban aquí y salían como None: un hueco por nubes
+    y un hueco por bug eran indistinguibles a los dos años.
+
     Args:
         rutas_por_cuadrante: {cuadrante: ruta del HDF5 descargado, o None}
         piezas: lista de PiezaCuadrante, o {cuadrante: [(x, y, w), ...]}
@@ -299,12 +311,15 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
         delete_files: Si borrar los HDF5 al terminar
 
     Returns:
-        MedicionResultado, o None si no quedó ningún píxel con medición.
+        MedicionResultado, o None si no hay medición que calcular.
+
+    Raises:
+        MedicionImposible: la cobertura y las imágenes no cuadran.
     """
     piezas_norm = _normalizar_piezas(piezas)
     if not piezas_norm:
-        print(f"⚠️ {municipio}: la tabla de cobertura no trae ninguna pieza")
-        return None
+        raise MedicionImposible(
+            "la tabla de cobertura no trae ninguna pieza", municipio, date_obj)
 
     try:
         matrices: dict[str | None, np.ndarray] = {}
@@ -340,9 +355,9 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
 
         formas = {m.shape for m in matrices.values()}
         if len(formas) > 1:
-            print(f"❌ {municipio} en {date_obj}: los cuadrantes traen retículas "
-                  f"distintas {formas}; no se pueden componer")
-            return None
+            raise MedicionImposible(
+                f"los cuadrantes traen retículas distintas {formas} y no se "
+                f"pueden componer", municipio, date_obj)
         forma = formas.pop()
         alto, ancho = forma
 
@@ -368,8 +383,9 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
                       f"de la retícula {forma} y se descartan")
 
         if not pesos_ref:
-            print(f"⚠️ No se encontraron coordenadas válidas para {municipio} en {date_obj}")
-            return None
+            raise MedicionImposible(
+                "ninguna coordenada de la tabla de cobertura cae dentro de la "
+                "retícula", municipio, date_obj)
 
         metricas = metricas_ponderadas(np.array(valores), np.array(cobertura, dtype=float))
         if metricas is None:
@@ -398,10 +414,6 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
             Mascara_municipio=crop["municipality_mask"],
             Cobertura_municipio=crop["municipality_coverage"],
         )
-
-    except Exception as e:
-        print(f"Error procesando {municipio} en {date_obj}: {e}")
-        return None
 
     finally:
         if delete_files:

@@ -240,6 +240,61 @@ la envolvente de un municipio con una isla lejana incluye todo lo que hay en med
 huecos en vez de devolver una de las partes como si fuera el municipio entero, que
 es lo que hacía antes sin decirlo.
 
+### Cuánto disco ocupa una corrida
+
+Cada fecha en vuelo retiene sus gránulos —uno por cuadrante— desde la primera
+descarga hasta que termina su último municipio, así que el pico de disco es:
+
+```
+pico ≈ NTL_MAX_FECHAS_CONCURRENTES × cuadrantes de la región × ~250 MB
+```
+
+Por omisión son **4 fechas a la vez**: con una región de dos cuadrantes, unos 2 GB.
+Se ajusta con la variable de entorno `NTL_MAX_FECHAS_CONCURRENTES` o con
+`run(..., max_concurrentes=N)`.
+
+Es independiente de `chunks`, que decide cada cuántas fechas se guarda progreso.
+Antes no había límite: se lanzaba una tarea por fecha y todas descargaban a la
+vez, de modo que acotar el disco obligaba a pedir checkpoints que quizá no se
+querían. Desde que un municipio puede necesitar cuatro cuadrantes en vez de uno,
+el margen es cuatro veces menor.
+
+### Cuándo falta una fila, y por qué
+
+Una fila ausente no dice por qué está ausente. El pipeline distingue tres cosas
+que antes eran indistinguibles:
+
+| Situación | Qué pasa | Cómo se ve |
+|---|---|---|
+| Falta una de varias imágenes | Sale el registro, parcial | `Fraccion_valida < 1`, `Cuadrantes_faltantes` |
+| No hay imagen, o la noche estaba nublada | No sale registro | Fila ausente. **Es un dato**, no un defecto |
+| La cobertura y las imágenes se contradicen | `MedicionImposible` | Anotado en `sat.fallos` |
+| Cualquier otro error | Propaga | Anotado en `sat.fallos` |
+
+Antes las tres últimas se atrapaban y salían como «no hay datos»: en una serie de
+diez años, una noche nublada y un defecto del código dejaban exactamente el mismo
+hueco, y no había manera de decir cuál fue cuál.
+
+Un fallo no detiene la corrida. Al terminar se resume y se guarda el detalle en
+`data/fallos.parquet`:
+
+```
+⚠️ 3 de 6570 mediciones fallaron (0.05%): 2 KeyError, 1 OSError. Faltan esas
+   filas de la serie y no es porque no hubiera imagen. El detalle está en `.fallos`.
+```
+
+```python
+sat = SatelliteImagesAsync(municipios)
+df = await sat.run(fechas)
+if sat.fallos:                 # municipio, fecha, cuadrantes, tipo, mensaje
+    print(pd.DataFrame(sat.fallos))
+```
+
+Con `run(..., estricto=True)` el primer fallo aborta, que es lo que quiere quien
+reconstruye una serie desde cero. La API lo expone en el campo `fallos` de
+`GET /jobs/{job_id}`: un job puede terminar `completed` y aun así traer filas de
+menos.
+
 ---
 
 ## Ejemplos de uso desde código
