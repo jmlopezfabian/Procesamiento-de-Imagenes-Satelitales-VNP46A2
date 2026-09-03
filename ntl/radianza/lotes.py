@@ -4,7 +4,8 @@ import os
 import glob
 from typing import Callable
 
-from ..core.config import PIXELES_MUNICIPIOS, TEMP_DIR, data_path, temp_path
+from ..core.config import (MAX_FECHAS_CONCURRENTES, PIXELES_MUNICIPIOS,
+                           TEMP_DIR, data_path, temp_path)
 from ..core.utils import normalize_municipio, parse_date, load_coord_data
 from ..core.downloader import find_file_async, download_file_async
 from .extraccion import process_image_mosaico
@@ -209,11 +210,44 @@ class SatelliteImagesAsync:
 
         return results
 
-    async def run(self, fechas, chunks=None, save_progress_enabled=True, on_progress: Callable[[str], None] | None = None):
+    async def _medir_fecha_limitada(self, session, fecha, limite):
+        """
+        `get_measures_for_date` con un permiso del semáforo tomado.
+
+        El límite va por fecha y no por descarga a propósito: una fecha retiene
+        sus gránulos hasta que termina su último municipio —el contador de
+        referencias los libera al final—, así que acotar las descargas
+        simultáneas no acotaría cuántos archivos hay residentes en disco, que es
+        lo que llena el volumen.
+
+        Es un envoltorio en vez de un `async with` dentro de
+        `get_measures_for_date` para que esa siga siendo llamable tal cual, sin
+        tener que fabricarle un semáforo.
+        """
+        async with limite:
+            return await self.get_measures_for_date(session, fecha)
+
+    async def run(self, fechas, chunks=None, save_progress_enabled=True,
+                  on_progress: Callable[[str], None] | None = None,
+                  max_concurrentes: int | None = None):
+        """
+        Procesa una lista de fechas.
+
+        `max_concurrentes` acota cuántas fechas se procesan a la vez y con ello
+        el pico de disco (ver MAX_FECHAS_CONCURRENTES en core.config). Es
+        independiente de `chunks`, que decide cada cuántas fechas se guarda
+        progreso: antes acotar el disco obligaba a pedir checkpoints que quizá
+        no se querían.
+        """
         results = []
         import aiohttp
         total_fechas = len(fechas)
         completed_count = 0
+        # El semáforo se crea aquí y no en __init__ porque __init__ es síncrono
+        # y puede ejecutarse sin un loop corriendo.
+        limite = asyncio.Semaphore(
+            max_concurrentes if max_concurrentes is not None else MAX_FECHAS_CONCURRENTES
+        )
 
         def _report_progress():
             nonlocal completed_count
@@ -225,7 +259,7 @@ class SatelliteImagesAsync:
             async with aiohttp.ClientSession() as session:
                 if chunks is None:
                     # Procesamiento original: todas las fechas de forma asíncrona
-                    tasks = [self.get_measures_for_date(session, f) for f in fechas]
+                    tasks = [self._medir_fecha_limitada(session, f, limite) for f in fechas]
                     for result in asyncio.as_completed(tasks):
                         datos_list = await result
                         if datos_list:
@@ -240,7 +274,7 @@ class SatelliteImagesAsync:
                         
                         try:
                             # Procesar el chunk actual de forma asíncrona
-                            tasks = [self.get_measures_for_date(session, f) for f in chunk_fechas]
+                            tasks = [self._medir_fecha_limitada(session, f, limite) for f in chunk_fechas]
                             chunk_results = []
                             
                             for result in asyncio.as_completed(tasks):

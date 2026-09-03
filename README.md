@@ -240,6 +240,25 @@ la envolvente de un municipio con una isla lejana incluye todo lo que hay en med
 huecos en vez de devolver una de las partes como si fuera el municipio entero, que
 es lo que hacía antes sin decirlo.
 
+### Cuánto disco ocupa una corrida
+
+Cada fecha en vuelo retiene sus gránulos —uno por cuadrante— desde la primera
+descarga hasta que termina su último municipio, así que el pico de disco es:
+
+```
+pico ≈ NTL_MAX_FECHAS_CONCURRENTES × cuadrantes de la región × ~250 MB
+```
+
+Por omisión son **4 fechas a la vez**: con una región de dos cuadrantes, unos 2 GB.
+Se ajusta con la variable de entorno `NTL_MAX_FECHAS_CONCURRENTES` o con
+`run(..., max_concurrentes=N)`.
+
+Es independiente de `chunks`, que decide cada cuántas fechas se guarda progreso.
+Antes no había límite: se lanzaba una tarea por fecha y todas descargaban a la
+vez, de modo que acotar el disco obligaba a pedir checkpoints que quizá no se
+querían. Desde que un municipio puede necesitar cuatro cuadrantes en vez de uno,
+el margen es cuatro veces menor.
+
 ---
 
 ## Ejemplos de uso desde código

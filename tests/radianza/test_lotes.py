@@ -1,4 +1,5 @@
 """Integration tests for ntl SatelliteImagesAsync with mocked download/processing."""
+import asyncio
 import os
 from datetime import date
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -171,3 +172,148 @@ class TestDescargaDeVariosCuadrantes:
 
         rutas = proc.call_args.args[0]
         assert rutas == {"h08v07": "/tmp/h08v07.h5", "h09v07": "/tmp/h09v07.h5"}
+
+
+@pytest.mark.asyncio
+class TestLimiteDeFechasConcurrentes:
+    """
+    Antes se lanzaba una tarea por fecha y todas descargaban a la vez: un año de
+    una región de dos cuadrantes son 730 gránulos simultáneos en disco. El
+    semáforo va por fecha —no por descarga— porque una fecha retiene sus
+    archivos hasta que termina su último municipio, así que limitar las descargas
+    no limitaría cuántos hay residentes.
+    """
+
+    def _sat(self, coberturas):
+        with patch("ntl.radianza.lotes.load_coord_data",
+                   side_effect=lambda m, _: coberturas[m]):
+            return SatelliteImagesAsync(list(coberturas))
+
+    def _espia_de_concurrencia(self):
+        """Cuenta cuántas fechas hay en vuelo y se queda con el máximo."""
+        estado = {"en_vuelo": 0, "pico": 0, "fechas": []}
+
+        async def medir(session, fecha):
+            estado["en_vuelo"] += 1
+            estado["pico"] = max(estado["pico"], estado["en_vuelo"])
+            estado["fechas"].append(fecha)
+            # Cede el control: sin esto las corrutinas no se solaparían nunca y
+            # la prueba pasaría aunque el semáforo no existiera.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            estado["en_vuelo"] -= 1
+            return [{"Fecha": fecha, "Municipio": "iztapalapa"}]
+
+        return estado, medir
+
+    @pytest.mark.parametrize("limite", [1, 2, 4])
+    async def test_nunca_hay_mas_fechas_en_vuelo_que_el_limite(self, mock_coord_data, limite):
+        with patch("ntl.radianza.lotes.load_coord_data", return_value=mock_coord_data):
+            sat = SatelliteImagesAsync("Iztapalapa")
+        fechas = [f"{d:02d}-01-24" for d in range(1, 13)]
+        estado, medir = self._espia_de_concurrencia()
+
+        with patch.object(sat, "get_measures_for_date", side_effect=medir):
+            df = await sat.run(fechas, save_progress_enabled=False,
+                               max_concurrentes=limite)
+
+        assert estado["pico"] <= limite, (
+            f"llegaron a correr {estado['pico']} fechas a la vez con límite {limite}")
+        assert len(df) == len(fechas), "acotar la concurrencia perdió fechas"
+
+    async def test_el_pico_de_archivos_en_disco_queda_acotado(self, tmp_path):
+        """
+        La aserción que de verdad importa: no cuántas corrutinas hay, sino
+        cuántos gránulos de cientos de megas coexisten en el volumen.
+        """
+        coberturas = {
+            "repartido": _CoberturaFalsa({"h08v07": [(1, 1, 1.0)],
+                                          "h09v07": [(0, 1, 0.5)]}),
+        }
+        sat = self._sat(coberturas)
+        fechas = [f"{d:02d}-01-24" for d in range(1, 11)]
+        pico = {"h5": 0}
+
+        async def descarga(session, url, save_path):
+            open(save_path, "w").write("h5")
+            pico["h5"] = max(pico["h5"], len(list(tmp_path.glob("*.h5"))))
+            await asyncio.sleep(0)
+            return save_path
+
+        with patch("ntl.radianza.lotes.TEMP_DIR", tmp_path), \
+             patch("ntl.core.config.TEMP_DIR", tmp_path), \
+             patch("ntl.radianza.lotes.temp_path", side_effect=lambda n: tmp_path / n), \
+             patch("ntl.radianza.lotes.find_file_async",
+                   new_callable=AsyncMock, side_effect=lambda s, y, d, c: f"http://x/{c}.h5"), \
+             patch("ntl.radianza.lotes.download_file_async", side_effect=descarga), \
+             patch("ntl.radianza.lotes.process_image_mosaico", return_value=None), \
+             patch("ntl.radianza.lotes.cleanup_temp_files"):
+            await sat.run(fechas, save_progress_enabled=False, max_concurrentes=2)
+
+        # 2 fechas en vuelo x 2 cuadrantes cada una.
+        assert pico["h5"] <= 4, f"llegó a haber {pico['h5']} gránulos en disco"
+        assert list(tmp_path.glob("*.h5")) == [], "quedaron archivos sin borrar"
+
+    async def test_los_resultados_no_dependen_del_limite(self, mock_coord_data):
+        """Acotar el disco no puede cambiar los datos."""
+        fechas = [f"{d:02d}-01-24" for d in range(1, 8)]
+        obtenidos = []
+        for limite in (1, 3, len(fechas)):
+            with patch("ntl.radianza.lotes.load_coord_data", return_value=mock_coord_data):
+                sat = SatelliteImagesAsync("Iztapalapa")
+            _, medir = self._espia_de_concurrencia()
+            with patch.object(sat, "get_measures_for_date", side_effect=medir):
+                df = await sat.run(fechas, save_progress_enabled=False,
+                                   max_concurrentes=limite)
+            obtenidos.append(sorted(df["Fecha"].tolist()))
+        assert obtenidos[0] == obtenidos[1] == obtenidos[2] == sorted(fechas)
+
+    async def test_una_fecha_que_revienta_no_se_queda_con_el_permiso(self, mock_coord_data):
+        """
+        Con `acquire`/`release` en vez de `async with`, una excepción dejaría el
+        permiso tomado y la corrida se iría bloqueando hasta pararse.
+        """
+        with patch("ntl.radianza.lotes.load_coord_data", return_value=mock_coord_data):
+            sat = SatelliteImagesAsync("Iztapalapa")
+        fechas = [f"{d:02d}-01-24" for d in range(1, 7)]
+
+        async def medir(session, fecha):
+            await asyncio.sleep(0)
+            raise RuntimeError("boom")
+
+        with patch.object(sat, "get_measures_for_date", side_effect=medir):
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(
+                    sat.run(fechas, save_progress_enabled=False, max_concurrentes=1),
+                    timeout=5,
+                )
+        # El semáforo quedó libre: si no, el wait_for habría expirado.
+
+    async def test_el_limite_tambien_aplica_procesando_por_chunks(self, mock_coord_data):
+        """
+        `chunks` acotaba la concurrencia de rebote, pero existe para guardar
+        progreso. El límite tiene que valer también ahí.
+        """
+        with patch("ntl.radianza.lotes.load_coord_data", return_value=mock_coord_data):
+            sat = SatelliteImagesAsync("Iztapalapa")
+        fechas = [f"{d:02d}-01-24" for d in range(1, 13)]
+        estado, medir = self._espia_de_concurrencia()
+
+        with patch.object(sat, "get_measures_for_date", side_effect=medir):
+            df = await sat.run(fechas, chunks=6, save_progress_enabled=False,
+                               max_concurrentes=2)
+
+        assert estado["pico"] <= 2
+        assert len(df) == len(fechas)
+
+    async def test_por_omision_toma_el_valor_de_configuracion(self, mock_coord_data):
+        with patch("ntl.radianza.lotes.load_coord_data", return_value=mock_coord_data):
+            sat = SatelliteImagesAsync("Iztapalapa")
+        fechas = [f"{d:02d}-01-24" for d in range(1, 13)]
+        estado, medir = self._espia_de_concurrencia()
+
+        with patch("ntl.radianza.lotes.MAX_FECHAS_CONCURRENTES", 3), \
+             patch.object(sat, "get_measures_for_date", side_effect=medir):
+            await sat.run(fechas, save_progress_enabled=False)
+
+        assert estado["pico"] <= 3

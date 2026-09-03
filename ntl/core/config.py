@@ -75,6 +75,22 @@ def temp_path(filename: str) -> Path:
     return TEMP_DIR / filename
 
 
+# Cuántas fechas se procesan a la vez.
+#
+# Cada fecha en vuelo retiene en disco sus gránulos —uno por cuadrante— desde la
+# primera descarga hasta que termina su último municipio, así que el pico de
+# disco es:
+#
+#     pico ≈ MAX_FECHAS_CONCURRENTES × cuadrantes de la región × ~250 MB
+#
+# Sin este límite se lanzaba una tarea por fecha y todas descargaban a la vez:
+# un año de una región de dos cuadrantes son 730 gránulos simultáneos. El
+# parámetro `chunks` lo acotaba de rebote, pero existe para guardar progreso, no
+# para cuidar el disco, y desde que un municipio puede necesitar cuatro
+# cuadrantes en vez de uno el margen es cuatro veces menor.
+MAX_FECHAS_CONCURRENTES = int(_primera_definida("NTL_MAX_FECHAS_CONCURRENTES") or 4)
+
+
 # Where the Parquet results are written.
 #
 # Esto era "../data", que además de depender del cwd escribía en el directorio
