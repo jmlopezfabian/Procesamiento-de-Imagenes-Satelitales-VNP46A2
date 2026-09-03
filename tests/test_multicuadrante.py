@@ -41,6 +41,7 @@ from ntl.geometria.mosaico import (
     cuadrante_referencia,
     poligono_en_pixeles_globales,
 )
+from ntl.core.errores import MedicionImposible
 from ntl.radianza.extraccion import process_image_mosaico
 
 # Cuadrante de prueba: 120 px de lado, 1/12 de grado por píxel.
@@ -101,7 +102,8 @@ def radianza_sintetica(x_global, y_global):
     return (x_global * 7 + y_global * 13) % 97 + 0.5
 
 
-def crear_cuadrante(directorio, cuadrante, relleno=False, calidad_mala=False):
+def crear_cuadrante(directorio, cuadrante, relleno=False, calidad_mala=False,
+                    forma=None):
     """
     HDF5 mínimo con la forma de VNP46A2, georreferenciado donde dice estar.
 
@@ -110,7 +112,7 @@ def crear_cuadrante(directorio, cuadrante, relleno=False, calidad_mala=False):
     procesamiento —con razón— se niega a usarlo.
     """
     h, v = int(cuadrante[1:3]), int(cuadrante[4:6])
-    alto, ancho = FORMA
+    alto, ancho = forma or FORMA
     ys, xs = np.mgrid[0:alto, 0:ancho]
     matriz = radianza_sintetica(h * ancho + xs, v * alto + ys).astype(np.float32)
     if relleno:
@@ -131,7 +133,7 @@ def crear_cuadrante(directorio, cuadrante, relleno=False, calidad_mala=False):
         ds.attrs["_FillValue"] = np.float32(-999.9)
         ds.attrs["scale_factor"] = 1.0
         ds.attrs["units"] = b"nWatts/(cm^2 sr)"
-        calidad = np.full(FORMA, 1 if calidad_mala else 0, dtype=np.uint8)
+        calidad = np.full((alto, ancho), 1 if calidad_mala else 0, dtype=np.uint8)
         grupo.create_dataset("Mandatory_Quality_Flag", data=calidad)
         info = f.create_group("HDFEOS INFORMATION")
         info.create_dataset(
@@ -504,3 +506,83 @@ class TestModeloDeCobertura:
             datos.cuadrante
         with pytest.raises(ValueError, match="ocupa 2 cuadrantes"):
             datos.pesos
+
+
+class TestNoHayMedicionVsNoSePuedeMedir:
+    """
+    Dos huecos que antes eran el mismo hueco.
+
+    `process_image_mosaico` atrapaba toda excepción y devolvía None, igual que
+    cuando no había medición. Así, en una serie de diez años, una noche nublada
+    y un defecto del código dejaban filas idénticamente ausentes. Ahora None
+    significa «no hay medición y es normal», y `MedicionImposible` significa que
+    la cobertura y las imágenes se contradicen.
+    """
+
+    def test_sin_imagen_ninguna_devuelve_none(self, tmp_path):
+        """No hay imagen todavía: es un resultado, no un defecto."""
+        coords = cuadrado(ESQUINA, 1.3)
+        piezas = cobertura_por_cuadrante(coords, FORMA)
+        r = process_image_mosaico({c: None for c in piezas}, piezas,
+                                  date(2024, 1, 1), "sintetico", delete_files=False)
+        assert r is None
+
+    def test_todo_nublado_devuelve_none(self, tmp_path):
+        """
+        Todos los píxeles con la bandera de calidad en malo: hay imagen y hay
+        territorio, pero ninguna observación utilizable. Sigue siendo un dato.
+        """
+        coords = cuadrado(ESQUINA, 1.3)
+        piezas = cobertura_por_cuadrante(coords, FORMA)
+        rutas = {c: crear_cuadrante(tmp_path, c, calidad_mala=True) for c in piezas}
+        r = process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
+                                  delete_files=False)
+        assert r is None
+
+    def test_la_tabla_sin_piezas_lanza(self):
+        with pytest.raises(MedicionImposible, match="ninguna pieza"):
+            process_image_mosaico({}, {}, date(2024, 1, 1), "sintetico",
+                                  delete_files=False)
+
+    def test_coordenadas_fuera_de_la_reticula_lanzan(self, tmp_path):
+        """
+        La tabla dice que el municipio está en un píxel que la imagen no tiene.
+        Eso no se arregla esperando a mañana: es una incoherencia.
+        """
+        piezas = {"h08v07": [(9999, 9999, 1.0)]}
+        rutas = {"h08v07": crear_cuadrante(tmp_path, "h08v07")}
+        with pytest.raises(MedicionImposible, match="ninguna coordenada"):
+            process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
+                                  delete_files=False)
+
+    def test_reticulas_incompatibles_lanzan(self, tmp_path):
+        """Dos cuadrantes con distinto tamaño de píxel no se pueden componer."""
+        coords = cuadrado(ESQUINA, 1.3)
+        piezas = cobertura_por_cuadrante(coords, FORMA)
+        rutas = {c: crear_cuadrante(tmp_path, c) for c in piezas}
+        # Se rehace uno con el doble de resolución.
+        raro = list(piezas)[-1]
+        otro = tmp_path / "raro"
+        otro.mkdir()
+        rutas[raro] = crear_cuadrante(otro, raro, forma=(240, 240))
+
+        with pytest.raises(MedicionImposible, match="retículas distintas"):
+            process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
+                                  delete_files=False)
+
+    def test_un_defecto_inesperado_propaga(self, tmp_path, monkeypatch):
+        """
+        Antes se tragaba y salía como None. Un bug tiene que llegar a quien
+        corre el pipeline, no disfrazarse de noche sin datos.
+        """
+        coords = cuadrado(ESQUINA, 1.3)
+        piezas = cobertura_por_cuadrante(coords, FORMA)
+        rutas = {c: crear_cuadrante(tmp_path, c) for c in piezas}
+
+        def revienta(*a, **k):
+            raise ValueError("un defecto cualquiera")
+
+        monkeypatch.setattr("ntl.radianza.extraccion.metricas_ponderadas", revienta)
+        with pytest.raises(ValueError, match="un defecto cualquiera"):
+            process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
+                                  delete_files=False)

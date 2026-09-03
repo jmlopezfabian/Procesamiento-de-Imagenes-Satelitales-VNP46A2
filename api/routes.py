@@ -100,6 +100,7 @@ async def get_job_status(job_id: str):
         finished_at=state.finished_at,
         error=state.error,
         total_results=state.total_results,
+        fallos=getattr(state, "fallos", []),
     )
 
 

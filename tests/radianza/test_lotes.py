@@ -193,7 +193,7 @@ class TestLimiteDeFechasConcurrentes:
         """Cuenta cuántas fechas hay en vuelo y se queda con el máximo."""
         estado = {"en_vuelo": 0, "pico": 0, "fechas": []}
 
-        async def medir(session, fecha):
+        async def medir(session, fecha, estricto=False):
             estado["en_vuelo"] += 1
             estado["pico"] = max(estado["pico"], estado["en_vuelo"])
             estado["fechas"].append(fecha)
@@ -277,7 +277,7 @@ class TestLimiteDeFechasConcurrentes:
             sat = SatelliteImagesAsync("Iztapalapa")
         fechas = [f"{d:02d}-01-24" for d in range(1, 7)]
 
-        async def medir(session, fecha):
+        async def medir(session, fecha, estricto=False):
             await asyncio.sleep(0)
             raise RuntimeError("boom")
 
@@ -317,3 +317,152 @@ class TestLimiteDeFechasConcurrentes:
             await sat.run(fechas, save_progress_enabled=False)
 
         assert estado["pico"] <= 3
+
+
+@pytest.mark.asyncio
+class TestUnFalloNoDesapareceEnSilencio:
+    """
+    Una fila que no está no dice por qué no está. Antes «esa noche estaba
+    nublado» y «el código se rompió» dejaban exactamente el mismo hueco, y a los
+    dos años no había manera de decir cuál fue cuál.
+    """
+
+    def _sat(self, coberturas):
+        with patch("ntl.radianza.lotes.load_coord_data",
+                   side_effect=lambda m, _: coberturas[m]):
+            return SatelliteImagesAsync(list(coberturas))
+
+    def _coberturas(self):
+        return {
+            "bueno": _CoberturaFalsa({"h08v07": [(1, 1, 1.0)]}),
+            "malo": _CoberturaFalsa({"h08v07": [(2, 2, 1.0)]}),
+        }
+
+    async def _correr(self, sat, procesar, **kw):
+        async def descarga(session, year, day, cuadrante, date_obj):
+            return f"/tmp/{cuadrante}.h5"
+
+        with patch.object(sat, "_download_and_cache_h5", side_effect=descarga), \
+             patch.object(sat, "_borrar_cuadrante"), \
+             patch("ntl.radianza.lotes.process_image_mosaico", side_effect=procesar):
+            return await sat.get_measures_for_date(None, "01-01-24", **kw)
+
+    def _procesar(self, rutas, piezas, date_obj, municipio, delete_files=True):
+        if municipio == "malo":
+            raise KeyError("DNB_BRDF-Corrected_NTL")
+        return MagicMock(model_dump=lambda: {"Municipio": municipio})
+
+    async def test_un_municipio_que_revienta_no_tumba_a_los_demas(self):
+        sat = self._sat(self._coberturas())
+        resultados = await self._correr(sat, self._procesar)
+        assert [r["Municipio"] for r in resultados] == ["bueno"]
+
+    async def test_el_fallo_queda_registrado_con_su_contexto(self):
+        sat = self._sat(self._coberturas())
+        await self._correr(sat, self._procesar)
+
+        assert len(sat.fallos) == 1
+        fallo = sat.fallos[0]
+        assert fallo["municipio"] == "malo"
+        assert fallo["fecha"] == "2024-01-01"
+        assert fallo["cuadrantes"] == ["h08v07"]
+        assert fallo["tipo"] == "KeyError"
+        assert "DNB_BRDF-Corrected_NTL" in fallo["mensaje"]
+
+    async def test_sin_medicion_no_es_un_fallo(self):
+        """
+        Una noche nublada devuelve None y deja la fila fuera: eso es un dato,
+        no un defecto, y no debe ensuciar la lista de fallos.
+        """
+        sat = self._sat(self._coberturas())
+        resultados = await self._correr(
+            sat, lambda *a, **k: None)
+        assert resultados == []
+        assert sat.fallos == []
+
+    async def test_estricto_aborta_en_el_primer_fallo(self):
+        sat = self._sat(self._coberturas())
+        with pytest.raises(KeyError):
+            await self._correr(sat, self._procesar, estricto=True)
+        assert len(sat.fallos) == 1
+
+    async def test_el_fallo_no_rompe_el_contador_de_referencias(self, tmp_path):
+        """
+        El decremento va fuera del try a propósito: si un municipio revienta, su
+        cuadrante tiene que liberarse igual o el archivo se queda en disco para
+        siempre. Queda fijado aquí antes de que alguien lo mueva dentro.
+        """
+        coberturas = self._coberturas()
+        sat = self._sat(coberturas)
+
+        async def descarga(session, url, save_path):
+            open(save_path, "w").write("h5")
+            return save_path
+
+        with patch("ntl.radianza.lotes.TEMP_DIR", tmp_path), \
+             patch("ntl.core.config.TEMP_DIR", tmp_path), \
+             patch("ntl.radianza.lotes.temp_path", side_effect=lambda n: tmp_path / n), \
+             patch("ntl.radianza.lotes.find_file_async",
+                   new_callable=AsyncMock, side_effect=lambda s, y, d, c: f"http://x/{c}.h5"), \
+             patch("ntl.radianza.lotes.download_file_async", side_effect=descarga), \
+             patch("ntl.radianza.lotes.process_image_mosaico",
+                   side_effect=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))):
+            await sat.get_measures_for_date(None, "01-01-24")
+
+        assert len(sat.fallos) == 2
+        assert list(tmp_path.glob("*.h5")) == [], \
+            "el cuadrante no se liberó cuando el municipio falló"
+        assert sat.cache_h5_files == {}
+
+    async def test_el_resumen_final_cuenta_los_fallos(self, mock_coord_data, capsys, tmp_path):
+        with patch("ntl.radianza.lotes.load_coord_data", return_value=mock_coord_data):
+            sat = SatelliteImagesAsync("Iztapalapa")
+
+        async def medir(session, fecha, estricto=False):
+            if fecha == "02-01-24":
+                sat.fallos.append({"municipio": "iztapalapa", "fecha": fecha,
+                                   "cuadrantes": ["h08v07"], "tipo": "OSError",
+                                   "mensaje": "disco lleno"})
+                return []
+            return [{"Fecha": fecha, "Municipio": "iztapalapa"}]
+
+        with patch.object(sat, "get_measures_for_date", side_effect=medir):
+            await sat.run(["01-01-24", "02-01-24"], save_progress_enabled=False)
+
+        salida = capsys.readouterr().out
+        assert "1 de 2 mediciones fallaron" in salida
+        assert "1 OSError" in salida
+
+    async def test_sin_fallos_no_imprime_nada(self, mock_coord_data, capsys):
+        with patch("ntl.radianza.lotes.load_coord_data", return_value=mock_coord_data):
+            sat = SatelliteImagesAsync("Iztapalapa")
+
+        async def medir(session, fecha, estricto=False):
+            return [{"Fecha": fecha, "Municipio": "iztapalapa"}]
+
+        with patch.object(sat, "get_measures_for_date", side_effect=medir):
+            await sat.run(["01-01-24"], save_progress_enabled=False)
+
+        assert "mediciones fallaron" not in capsys.readouterr().out
+
+    async def test_el_detalle_se_persiste_al_lado_de_los_resultados(
+            self, mock_coord_data, tmp_path):
+        """Un resumen impreso en una terminal que se cerró no es evidencia."""
+        with patch("ntl.radianza.lotes.load_coord_data", return_value=mock_coord_data):
+            sat = SatelliteImagesAsync("Iztapalapa")
+
+        async def medir(session, fecha, estricto=False):
+            sat.fallos.append({"municipio": "iztapalapa", "fecha": fecha,
+                               "cuadrantes": ["h08v07"], "tipo": "KeyError",
+                               "mensaje": "falta el dataset"})
+            return []
+
+        with patch("ntl.radianza.lotes.data_path",
+                   side_effect=lambda n: tmp_path / n), \
+             patch.object(sat, "get_measures_for_date", side_effect=medir):
+            await sat.run(["01-01-24"], save_progress_enabled=True)
+
+        guardado = pd.read_parquet(tmp_path / "fallos.parquet")
+        assert len(guardado) == 1
+        assert guardado.iloc[0]["municipio"] == "iztapalapa"
+        assert guardado.iloc[0]["tipo"] == "KeyError"
