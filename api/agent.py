@@ -208,7 +208,7 @@ def get_agent() -> Agent:
     if _agent_instance is None:
         print("[Agent] Creating agent (first call)...")
         _agent_instance = _create_agent()
-        print("[Agent] Agent ready (model: gemini-2.0-flash)")
+        print(f"[Agent] Agent ready (model: {_agent_instance.model.model_name})")
     return _agent_instance
 
 
