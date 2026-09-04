@@ -135,11 +135,29 @@ async def find_file_async(session, year, day, cuadrante):
     print(f"No se encontró archivo para cuadrante {cuadrante} en {url}")
     return None
 
+def _borrar(ruta):
+    """Quita un archivo a medias sin que su ausencia sea un problema."""
+    try:
+        if os.path.exists(ruta):
+            os.remove(ruta)
+    except OSError as e:
+        print(f"No se pudo borrar {ruta}: {e}")
+
+
 async def download_file_async(session, url, path, max_retries=3, delay=2):
     """
     Descarga un archivo con sistema de retry.
+
     Sigue redirects manualmente preservando el header Authorization, ya que aiohttp
     lo elimina en redirects a otro host (p.ej. Earthdata) y LAADS requiere el token.
+
+    Escribe a `path + ".part"` y renombra al terminar, después de comprobar el
+    tamaño contra Content-Length. Antes se escribía directo sobre la ruta final:
+    una conexión cortada dejaba ahí un gránulo truncado que el cache daba por
+    bueno y servía al resto de municipios de esa fecha. h5py no lo lee, así que
+    no producía métricas malas —eso se comprobó—, pero el municipio salía como
+    si le faltara la imagen: un registro parcial en vez de un reintento. Y el
+    archivo corrupto se quedaba, así que el reintento nunca llegaba.
     """
     for attempt in range(max_retries):
         try:
@@ -165,14 +183,33 @@ async def download_file_async(session, url, path, max_retries=3, delay=2):
                         continue
                     if resp.status == 200:
                         print(f"Descargando: {url} (intento {attempt + 1}/{max_retries})")
+                        esperado = resp.headers.get("Content-Length")
+                        esperado = int(esperado) if esperado and esperado.isdigit() else None
+                        parcial = path + ".part"
                         total_size = 0
-                        with open(path, "wb") as f:
-                            while True:
-                                chunk = await resp.content.read(8192)
-                                if not chunk:
-                                    break
-                                f.write(chunk)
-                                total_size += len(chunk)
+                        try:
+                            with open(parcial, "wb") as f:
+                                while True:
+                                    chunk = await resp.content.read(8192)
+                                    if not chunk:
+                                        break
+                                    f.write(chunk)
+                                    total_size += len(chunk)
+                        except BaseException:
+                            _borrar(parcial)
+                            raise
+
+                        if esperado is not None and total_size != esperado:
+                            # Incompleto. Se tira: dejarlo sería peor que no
+                            # tenerlo, porque tiene toda la pinta de un gránulo.
+                            _borrar(parcial)
+                            print(f"Descarga incompleta de {url}: {total_size} de "
+                                  f"{esperado} bytes (intento {attempt + 1}/{max_retries})")
+                            break
+
+                        # El renombrado es atómico: en la ruta final solo aparece
+                        # un archivo entero, nunca uno a medio escribir.
+                        os.replace(parcial, path)
                         print(f"Descarga completada: {path} ({total_size} bytes)")
                         return path
                     print(f"Fallo la descarga del archivo: {url} - Status: {resp.status} (intento {attempt + 1}/{max_retries})")
