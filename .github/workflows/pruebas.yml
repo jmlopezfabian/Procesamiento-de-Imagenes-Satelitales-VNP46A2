@@ -1,0 +1,62 @@
+name: pruebas
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 es el mínimo que declara pyproject; 3.14 es donde se desarrolla.
+        python: ["3.11", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Instalar el paquete y sus extras de prueba
+        # No se instala requirements.txt: arrastra Jupyter, geopandas y
+        # statsmodels, que no hacen falta para correr la suite.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[api,dev]"
+
+      - name: Pruebas
+        run: pytest -q --strict-markers --cov=ntl --cov-report=term-missing --cov-report=xml -rs | tee salida.txt
+
+      - name: Pruebas lentas (geometría real a 2400x2400)
+        # pytest.ini las deselecciona por omisión para no cargar el ciclo de
+        # edición con un minuto de intersecciones exactas. Aquí se corren
+        # siempre: son las que comprueban el multicuadrante sobre límites
+        # administrativos reales, que es lo que ningún municipio de ntl_data/
+        # ejercita.
+        run: pytest -q --strict-markers -m lento -rs | tee -a salida.txt
+
+      - name: Ninguna prueba puede saltarse
+        # Sin pyproj, las pruebas que comparan la cobertura contra el área
+        # geodésica sobre WGS84 se saltan en silencio: son la verdad-terreno de
+        # la tabla, así que una corrida verde sin ellas engaña. Que se salte una
+        # prueba tiene que romper la corrida, no aparecer en la letra pequeña.
+        run: |
+          if grep -qE "[0-9]+ skipped" salida.txt; then
+            echo "::error::Hay pruebas saltadas; falta una dependencia del extra [dev]"
+            grep SKIPPED salida.txt || true
+            exit 1
+          fi
+
+      - name: Guardar el informe de cobertura
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobertura-py${{ matrix.python }}
+          path: coverage.xml
+          if-no-files-found: warn
