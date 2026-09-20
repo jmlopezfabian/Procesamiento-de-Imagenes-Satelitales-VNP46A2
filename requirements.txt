@@ -43,12 +43,6 @@ pytz>=2021.1
 attrs>=21.0.0
 packaging>=21.0
 
-# API
-fastapi>=0.100.0
-uvicorn[standard]>=0.22.0
-pydantic-ai>=0.0.14
-google-genai>=1.0.0
-
 # Análisis interactivo (Jupyter)
 ipython>=7.20.0
 ipykernel>=6.0.0

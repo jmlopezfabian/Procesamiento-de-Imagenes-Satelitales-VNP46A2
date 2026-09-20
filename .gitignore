@@ -175,6 +175,14 @@ cython_debug/
 
 temp/
 
+# Resultados: es el DATA_DIR por omisión (Path.cwd()/"data"), así que aquí
+# aterrizan los parquet de cada corrida. Estuvo versionado y acabó guardando una
+# copia obsoleta de la tabla de cobertura junto a la buena de ntl_data/, que es
+# de donde la lee el paquete.
+data/
+
+.DS_Store
+
 .claude/
 
 .cursor/

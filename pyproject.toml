@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ntl"
-version = "0.8.0"
+version = "0.9.0"
 description = "VNP46A2 satellite nighttime radiance processing"
 requires-python = ">=3.11"
 dependencies = [
@@ -23,6 +23,25 @@ dependencies = [
     "matplotlib>=3.4",
     # shapely: intersección exacta polígono-píxel en ntl.geometria.cobertura
     "shapely>=2.0",
+]
+
+[project.optional-dependencies]
+# Ya no hay extra `api`. La API, el agente y el tablero viven en daily-ntl, que
+# es la aplicación; este paquete es la librería que esa aplicación importa, y
+# la flecha va en un solo sentido. Declarar aquí FastAPI y un SDK de Gemini
+# ponía media aplicación dentro de la librería y daba pie a que las dos
+# volvieran a competir.
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "pytest-mock>=3.10",
+    # pyarrow: los resultados y el detalle de fallos se guardan en Parquet.
+    "pyarrow>=10.0",
+    # pyproj: sin él, las pruebas que comparan la cobertura contra el área
+    # geodésica sobre WGS84 se saltan en silencio. Son la verdad-terreno de la
+    # tabla: justo las que no pueden faltar en una corrida automática.
+    "pyproj>=3.0",
 ]
 
 [tool.setuptools.packages.find]
