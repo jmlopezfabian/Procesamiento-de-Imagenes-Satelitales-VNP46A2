@@ -1,8 +1,10 @@
 ## Procesamiento de Imágenes Satelitales Black Marble
 
 Proyecto para procesar imágenes satelitales de luminosidad nocturna del producto **VNP46A2**
-(Black Marble, NASA) y obtener métricas de radianza por municipio.  
-Incluye una **API asíncrona con FastAPI** para lanzar jobs de procesamiento en segundo plano y guardar resultados en Parquet.
+(Black Marble, NASA) y obtener métricas de radianza por municipio.
+
+Es una **librería**: el tablero y el servicio que la usan a diario viven en
+daily-ntl. Ver "Dónde vive la aplicación".
 
 ### Componentes principales
 
@@ -13,7 +15,6 @@ El paquete `ntl/` está dividido por responsabilidad, no por modelo de concurren
   municipio**; su resultado es estático mientras no cambie la delimitación oficial.
 - `ntl/radianza/`: cobertura → métricas de luminosidad. Corre **todos los días**
   sobre cada imagen, descargando en paralelo y agrupando por cuadrante.
-- `api/`: aplicación FastAPI que expone el procesamiento como servicio HTTP.
 - `ntl_data/`: datos auxiliares (tabla de cobertura, límites geográficos).
 
 El paquete se llama `ntl` por *nighttime lights*, el acrónimo con el que la literatura
@@ -45,88 +46,27 @@ pip install -r requirements-dev.txt
 
 
 
-## Uso de la API FastAPI (versión async)
+## Dónde vive la aplicación
 
-Desde la raíz del proyecto:
+Este repositorio es una **librería**. Responde una pregunta: *dado un polígono y
+una fecha, ¿cuánta radianza hubo?* No sabe qué es HTTP, una base de datos, un
+usuario ni un calendario, y nada aquí importa desde la aplicación.
 
-```bash
-# Opción 1: Con venv activado
-source .venv/bin/activate  # o .venv\Scripts\activate en Windows
-uvicorn api.main:app --reload
+El tablero, la API, la caché, la autenticación y la recolección diaria están en
+**daily-ntl**, que instala este paquete como dependencia. La flecha va en un solo
+sentido y conviene que siga así: cuánto esperar a que la NASA publique es política
+de operación, no un hecho sobre cómo se calcula la radianza.
 
-# Opción 2: Sin activar venv (usa .venv automáticamente)
-./run.sh
-```
+Hasta la versión 0.8.0 este repositorio traía además un `api/` con su propio
+servidor FastAPI, un agente y un `index.html`. Era una demostración —el
+empaquetado ya la excluía de la distribución y la escondía tras un extra
+`[api]`— pero duplicaba a daily-ntl con jobs en memoria, sin caché persistente y
+sin autenticación. Se quitó para que no hubiera dos aplicaciones compitiendo por
+el mismo trabajo. Lo único que tenía y daily-ntl no, el agente conversacional,
+se movió allá.
 
-La documentación interactiva y la interfaz web estarán en:
-
-- `http://localhost:8000` – Interfaz web para usar los endpoints
-- `http://localhost:8000/docs` – Documentación Swagger
-
-### Endpoints principales
-
-- **`GET /municipios`**
-  - Devuelve la lista de municipios disponibles para procesamiento.
-  - Respuesta: `{ "municipios": ["iztapalapa", "coyoacan", ...] }`
-
-- **`POST /jobs`**
-  - Crea un job de procesamiento asíncrono.
-  - Cuerpo (`JobRequest`):
-
-    ```json
-    {
-      "municipios": ["iztapalapa"],
-      "fecha_inicio": "2024-01-01",
-      "fecha_fin": "2024-01-03",
-      "chunks": 2
-    }
-    ```
-
-  - Respuesta (`JobStatus`, HTTP 202):
-
-    ```json
-    {
-      "job_id": "uuid-generado",
-      "status": "pending",
-      "progress": null,
-      "created_at": "2024-01-01T00:00:00",
-      "finished_at": null,
-      "error": null,
-      "total_results": 0
-    }
-    ```
-
-- **`GET /jobs/{job_id}`**
-  - Consulta el estado actual del job (`pending`, `running`, `completed`, `failed`).
-  - Respuesta: `JobStatus`.
-
-- **`GET /jobs/{job_id}/results`**
-  - Devuelve los resultados del job una vez completado.
-  - Respuesta (`JobResult`): contiene `results`, una lista de `MedicionResultado` serializados a JSON, por ejemplo:
-
-    ```json
-    {
-      "job_id": "uuid-generado",
-      "results": [
-        {
-          "Fecha": "2024-01-01",
-          "Municipio": "iztapalapa",
-          "Cantidad_de_pixeles": 114.39,
-          "Suma_de_radianza": 1000.0,
-          "Media_de_radianza": 10.0,
-          "Desviacion_estandar_de_radianza": 1.0,
-          "Maximo_de_radianza": 12.0,
-          "Minimo_de_radianza": 8.0,
-          "Percentil_25_de_radianza": 9.0,
-          "Percentil_50_de_radianza": 10.0,
-          "Percentil_75_de_radianza": 11.0
-        }
-      ]
-    }
-    ```
-
-- **`DELETE /jobs/{job_id}`**
-  - Cancela un job pendiente/en ejecución y lo elimina del store.
+Para usar el procesamiento desde código, ver "Ejemplos de uso desde código" más
+abajo.
 
 ---
 
@@ -299,19 +239,17 @@ menos.
 
 ## Ejemplos de uso desde código
 
-En la carpeta `examples/` hay tres scripts listos para ejecutar desde la raíz del proyecto:
+En la carpeta `examples/` hay dos scripts listos para ejecutar desde la raíz del proyecto:
 
 - `examples/sync_example.py`: uso básico de la versión síncrona (`SatelliteProcessor`).
 - `examples/async_example.py`: uso básico de la versión asíncrona (`SatelliteImagesAsync`).
-- `examples/api_example.py`: consumo de la API FastAPI (requiere tener levantado `uvicorn api.main:app --reload`).
-
-Ejemplos de ejecución:
 
 ```bash
 python examples/sync_example.py
 python examples/async_example.py
-python examples/api_example.py
 ```
+
+Los dos ejemplos que consumían la API por HTTP se fueron con ella.
 
 ---
 
