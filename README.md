@@ -317,17 +317,56 @@ python examples/api_example.py
 
 ## Ejecución de tests
 
-El proyecto usa `pytest` y tests para:
-- Lógica síncrona y asíncrona.
-- Descarga de archivos.
-- API FastAPI (endpoints y manejo de jobs).
-
-Desde la raíz del proyecto, con el entorno virtual activado:
+Instalación del entorno de pruebas (no hace falta `requirements.txt`, que
+arrastra Jupyter y geopandas):
 
 ```bash
-python -m pytest          # Ejecuta toda la batería de tests
-python -m pytest tests/api  # Solo tests de la API
+pip install -e ".[api,dev]"
 ```
+
+```bash
+python -m pytest              # toda la batería, menos las marcadas `lento`
+python -m pytest -m lento     # geometría real a 2400x2400: ~2 minutos
+python -m pytest tests/api    # solo la API
+```
+
+Cubren la lógica síncrona y asíncrona, la descarga, la API, la geometría de
+cobertura y el reparto entre cuadrantes.
+
+### Geometría real, y por qué está marcada aparte
+
+Los 18 municipios de `ntl_data/` caben todos en un cuadrante y son polígonos
+simples, así que **en producción el camino multicuadrante no se ejecuta nunca**:
+estaba probado solo con figuras sintéticas y con municipios reales trasladados a
+las esquinas de la retícula.
+
+`tests/test_geometria_real.py` usa límites administrativos reales sin retocar
+—Natural Earth, dominio público— de estados que sí cruzan: 21 de los 33 estados
+de México cruzan una línea de 10 grados.
+
+| Estado | Cuadrantes | Partes |
+|---|---|---|
+| Distrito Federal | 1 | 1 |
+| Guanajuato | 3 | 1 |
+| Quintana Roo | 2 | 5 (Cozumel, Isla Mujeres, Holbox) |
+| Campeche | 4 | 2 |
+| Sonora | 4 | 8 (islas del Golfo de California) |
+
+Sonora es el caso que cruza los dos problemas difíciles: cuatro cuadrantes y
+ocho partes, con islas en cuadrantes distintos del continente.
+
+Intersecar exactamente uno de estos contra la retícula de 2400×2400 son decenas
+de segundos, así que `pytest.ini` deselecciona las pesadas por omisión y CI las
+corre siempre. Guanajuato se queda en la corrida normal para que un cruce real
+se compruebe en cada cambio.
+
+### Integración continua
+
+`.github/workflows/pruebas.yml` corre la batería en cada push a `main` y
+`develop` y en cada pull request, sobre Python 3.11 y 3.14. Un paso comprueba
+que **no se salte ninguna prueba**: sin `pyproj`, las que comparan la cobertura
+contra el área geodésica sobre WGS84 se saltaban en silencio, y son la
+verdad-terreno de la tabla.
 
 ---
 

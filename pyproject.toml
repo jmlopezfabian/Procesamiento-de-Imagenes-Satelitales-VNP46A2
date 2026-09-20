@@ -25,6 +25,32 @@ dependencies = [
     "shapely>=2.0",
 ]
 
+[project.optional-dependencies]
+# La API y el agente no son dependencias del paquete: `import ntl` no los toca.
+# Estaban declarados solo en requirements.txt, junto a Jupyter y geopandas, así
+# que no había forma de instalar lo necesario para levantar la API sin instalar
+# también el entorno de análisis interactivo.
+api = [
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.22",
+    "pydantic-ai>=0.0.14",
+    "google-genai>=1.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "pytest-mock>=3.10",
+    # httpx: lo necesita el TestClient de FastAPI en tests/api.
+    "httpx>=0.24",
+    # pyarrow: los resultados y el detalle de fallos se guardan en Parquet.
+    "pyarrow>=10.0",
+    # pyproj: sin él, las pruebas que comparan la cobertura contra el área
+    # geodésica sobre WGS84 se saltan en silencio. Son la verdad-terreno de la
+    # tabla: justo las que no pueden faltar en una corrida automática.
+    "pyproj>=3.0",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 # ntl_data ships the municipality coordinate tables that ntl.core.config
