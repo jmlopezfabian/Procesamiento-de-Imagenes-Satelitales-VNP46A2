@@ -7,9 +7,9 @@ from typing import Any
 
 from ..core.config import IMAGE_PATH, find_image_path
 from ..core.errores import MedicionImposible
-from ..core.lectura import leer_radianza
+from ..core.lectura import leer_antiguedad, leer_radianza, leer_rellenada
 from ..core.metricas import metricas_ponderadas
-from ..core.models import MedicionResultado, PiezaCuadrante
+from ..core.models import MedicionResultado, MetricasCapa, PiezaCuadrante
 from ..core.utils import verificar_georreferencia
 from ..geometria.mosaico import a_marco_referencia, cuadrante_referencia
 
@@ -240,13 +240,71 @@ def _es_hdf5(ruta: str) -> bool:
     return True
 
 
+def _metricas_vacias() -> dict:
+    """
+    Agregados de una capa que no midió nada: área cero, no valores inventados.
+
+    Se usa cuando el algoritmo principal no recuperó ningún píxel pero la capa
+    rellenada sí trae valor. El registro tiene que decir «esta noche no se
+    midió», y un cero de área lo dice; copiar ahí el relleno lo borraría.
+    """
+    return {
+        "Cantidad_de_pixeles": 0.0,
+        "Suma_de_radianza": 0.0,
+        "Media_de_radianza": 0.0,
+        "Desviacion_estandar_de_radianza": 0.0,
+        "Maximo_de_radianza": 0.0,
+        "Minimo_de_radianza": 0.0,
+        "Percentil_25_de_radianza": 0.0,
+        "Percentil_50_de_radianza": 0.0,
+        "Percentil_75_de_radianza": 0.0,
+        "Fraccion_valida": 0.0,
+    }
+
+
+def _resumir_antiguedad(edades: np.ndarray, pesos: np.ndarray):
+    """
+    (mediana ponderada de la antigüedad, fracción de área medida esa noche).
+
+    La mediana se pondera por área igual que el resto de las métricas, para que
+    un píxel de frontera a medias no pese como uno entero. La fracción medida
+    cuenta el área con antigüedad 0: es la parte del municipio en la que la
+    capa rellenada vale una observación de esa noche y no una repetida.
+    """
+    finitas = np.isfinite(edades) & (pesos > 0)
+    if not finitas.any():
+        return None, None
+
+    e, w = edades[finitas], pesos[finitas]
+    orden = np.argsort(e)
+    e, w = e[orden], w[orden]
+    acumulado = np.cumsum(w)
+    mediana = float(e[np.searchsorted(acumulado, acumulado[-1] / 2.0)])
+
+    area_total = float(pesos[pesos > 0].sum())
+    medida = float(w[e == 0].sum()) / area_total if area_total > 0 else 0.0
+    return mediana, medida
+
+
+def _crop_capa(capas, pesos_ref, desplazamientos, forma):
+    """Recorte de una capa alternativa al mismo bbox que el principal, o None."""
+    presentes = {c: m for c, m in capas.items() if m is not None}
+    if not presentes:
+        return None
+    return _crop_mosaico(presentes, pesos_ref, desplazamientos, forma)["radiance_matrix"]
+
+
 def _leer_cuadrante(ruta: str, cuadrante: str | None):
     """
-    Radianza de un cuadrante, ya en unidades físicas y con NaN donde no hay medición.
+    Las capas de un cuadrante, en unidades físicas y con NaN donde no hay medición.
 
-    Devuelve (matriz, lectura) o None si el archivo no sirve. No lanza: en un
-    mosaico, que falte un cuadrante no debe tirar el municipio entero; el
-    territorio perdido se contabiliza después en Fraccion_valida.
+    Devuelve (matriz, lectura) o None si el archivo no sirve. `lectura` lleva
+    además la capa rellenada y la antigüedad cuando el gránulo las trae, que es
+    lo que permite emitir un registro las noches en que el algoritmo principal
+    no recuperó nada.
+
+    No lanza: en un mosaico, que falte un cuadrante no debe tirar el municipio
+    entero; el territorio perdido se contabiliza después en Fraccion_valida.
     """
     try:
         if not _es_hdf5(ruta):
@@ -255,6 +313,10 @@ def _leer_cuadrante(ruta: str, cuadrante: str | None):
             image_matrix, lectura = leer_radianza(hdf_file)
             if cuadrante:
                 verificar_georreferencia(hdf_file, cuadrante, image_matrix.shape)
+            rellenada = leer_rellenada(hdf_file)
+            lectura = dict(lectura)
+            lectura["rellenada"] = rellenada[0] if rellenada else None
+            lectura["antiguedad"] = leer_antiguedad(hdf_file)
         return image_matrix, lectura
     except Exception as e:
         print(f"Error leyendo {cuadrante or ruta}: {e}")
@@ -323,6 +385,8 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
 
     try:
         matrices: dict[str | None, np.ndarray] = {}
+        rellenadas: dict[str | None, np.ndarray | None] = {}
+        antiguedades: dict[str | None, np.ndarray | None] = {}
         lectura = None
         for cuadrante in piezas_norm:
             ruta = rutas_por_cuadrante.get(cuadrante)
@@ -330,6 +394,8 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
             if leido is None:
                 continue
             matrices[cuadrante], lectura_cuadrante = leido
+            rellenadas[cuadrante] = lectura_cuadrante.get("rellenada")
+            antiguedades[cuadrante] = lectura_cuadrante.get("antiguedad")
             lectura = lectura or lectura_cuadrante
 
         faltantes = [c for c in piezas_norm if c not in matrices]
@@ -366,9 +432,12 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
         # Los pesos llegan locales a cada cuadrante; el recorte los necesita en
         # un marco común, y la radianza en el de su propia imagen.
         valores, cobertura, pesos_ref = [], [], []
+        valores_rellenados, edades = [], []
         for cuadrante, pesos in piezas_norm.items():
             dx, dy = desplazamientos[cuadrante]
             matriz = matrices.get(cuadrante)
+            relleno = rellenadas.get(cuadrante)
+            edad = antiguedades.get(cuadrante)
             fuera = 0
             for x, y, w in pesos:
                 if not (0 <= y < alto and 0 <= x < ancho):
@@ -376,6 +445,9 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
                     continue
                 # Un cuadrante que falta aporta área sin medición: NaN, no cero.
                 valores.append(float(matriz[y, x]) if matriz is not None else np.nan)
+                valores_rellenados.append(
+                    float(relleno[y, x]) if relleno is not None else np.nan)
+                edades.append(float(edad[y, x]) if edad is not None else np.nan)
                 cobertura.append(w)
                 pesos_ref.append((x + dx, y + dy, w))
             if fuera:
@@ -387,11 +459,35 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
                 "ninguna coordenada de la tabla de cobertura cae dentro de la "
                 "retícula", municipio, date_obj)
 
-        metricas = metricas_ponderadas(np.array(valores), np.array(cobertura, dtype=float))
-        if metricas is None:
-            print(f"⚠️ {municipio} en {date_obj}: ningún píxel con medición válida")
+        pesos_np = np.array(cobertura, dtype=float)
+        metricas = metricas_ponderadas(np.array(valores), pesos_np)
+        metricas_relleno = metricas_ponderadas(np.array(valores_rellenados), pesos_np)
+        edad_mediana, fraccion_medida = _resumir_antiguedad(np.array(edades), pesos_np)
+
+        # Antes se devolvía None en cuanto el algoritmo principal no recuperaba
+        # nada, y esa noche desaparecía de la serie. Pero el gránulo sí trae
+        # algo: la capa rellenada. Sobre Cuauhtémoc, 13 de 16 fechas publicadas
+        # de una ventana de tres semanas no tenían ninguna recuperación y aun
+        # así traían valor rellenado. Descartarlas era tirar lo que el satélite
+        # sí entregó.
+        #
+        # Se emite registro si CUALQUIERA de las dos capas trae algo. Las dos
+        # viajan etiquetadas —Fraccion_valida para la medida, Antiguedad y
+        # Fraccion_medida para la rellenada—, así que quien consuma decide.
+        if metricas is None and metricas_relleno is None:
+            print(f"⚠️ {municipio} en {date_obj}: ninguna capa del gránulo trae "
+                  f"valor para este municipio")
             return None
-        if metricas["Fraccion_valida"] < 1.0:
+
+        if metricas is None:
+            print(f"ℹ️ {municipio} en {date_obj}: sin recuperación del algoritmo "
+                  f"principal; el registro sale solo con la capa rellenada "
+                  f"(antigüedad mediana {edad_mediana:.0f} d). No es una medición "
+                  f"de esta noche.")
+            # Los agregados de la capa principal quedan en cero-área, no
+            # inventados a partir del relleno: el registro dice que no se midió.
+            metricas = _metricas_vacias()
+        elif metricas["Fraccion_valida"] < 1.0:
             print(f"⚠️ {municipio} en {date_obj}: solo "
                   f"{metricas['Fraccion_valida']*100:.1f}% del territorio trae medición")
 
@@ -413,6 +509,12 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
             Matriz_de_radianza=crop["radiance_matrix"],
             Mascara_municipio=crop["municipality_mask"],
             Cobertura_municipio=crop["municipality_coverage"],
+            Radianza_rellenada=(
+                MetricasCapa(**metricas_relleno) if metricas_relleno else None),
+            Antiguedad_mediana_dias=edad_mediana,
+            Fraccion_medida=fraccion_medida,
+            Matriz_rellenada=_crop_capa(
+                rellenadas, pesos_ref, desplazamientos, forma),
         )
 
     finally:

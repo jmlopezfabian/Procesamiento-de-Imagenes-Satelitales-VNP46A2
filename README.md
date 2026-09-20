@@ -199,6 +199,38 @@ vez, de modo que acotar el disco obligaba a pedir checkpoints que quizá no se
 querían. Desde que un municipio puede necesitar cuatro cuadrantes en vez de uno,
 el margen es cuatro veces menor.
 
+### La capa rellenada, y por qué nunca va sola
+
+El gránulo trae dos radianzas. `DNB_BRDF-Corrected_NTL` es la medición de esa
+noche, filtrada por `Mandatory_Quality_Flag`: solo píxeles recuperados de
+verdad. `Gap_Filled_DNB_BRDF-Corrected_NTL` vale exactamente lo mismo donde hubo
+recuperación y arrastra la última buena donde no la hubo, así que trae valor
+**todos los días**.
+
+Las dos se publican. `Radianza_rellenada` lleva los mismos agregados que la capa
+principal, y el registro sale aunque el algoritmo principal no haya recuperado
+nada: antes esa noche desaparecía de la serie, y sobre Cuauhtémoc eso eran 13 de
+16 fechas publicadas de una ventana de tres semanas. El satélite sí entregó algo.
+
+Lo que no se puede es publicar la capa rellenada sin su procedencia:
+
+- `Antiguedad_mediana_dias` — mediana ponderada por área de
+  `Latest_High_Quality_Retrieval`. 0 es "se midió esta noche"; N es "es una
+  observación de hace N días, repetida".
+- `Fraccion_medida` — qué parte del municipio tiene antigüedad 0.
+- Cuando el principal no recuperó, sus agregados salen en **cero-área**
+  (`Fraccion_valida = 0`), no copiados del relleno. El registro dice que no se
+  midió.
+
+La razón está medida: el 1 y el 2 de septiembre de 2026, sobre Cuauhtémoc, la
+capa rellenada trae los **198 píxeles idénticos**, diferencia máxima 0.0, con la
+antigüedad pasando de 5 a 6 días. Son la misma observación del 27 de agosto
+repetida dos veces. Para graficar una serie continua está bien; para un modelo
+con rezagos no, porque la autocorrelación sale artificialmente ~1 y la varianza
+subestimada. Quien modele filtra por `Antiguedad_mediana_dias == 0`; quien
+grafique usa la capa y marca los tramos arrastrados. Las dos cosas requieren que
+la etiqueta viaje con el dato.
+
 ### Cuándo falta una fila, y por qué
 
 Una fila ausente no dice por qué está ausente. El pipeline distingue tres cosas

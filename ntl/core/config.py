@@ -52,6 +52,20 @@ DATASETS_RADIANCIA = (
 BANDERA_CALIDAD = "Mandatory_Quality_Flag"
 CALIDAD_ACEPTABLE = 0
 
+# Capa rellenada por la NASA. Donde el algoritmo principal recupera, vale
+# exactamente lo mismo que él; donde no, arrastra la última recuperación buena.
+# Medido sobre Cuauhtémoc el 1 y el 2 de septiembre de 2026: los 198 píxeles
+# idénticos entre ambos días, diferencia máxima 0.0, con la antigüedad pasando
+# de 5 a 6 días. O sea que da un valor todos los días, pero dos días seguidos
+# sin recuperación no son dos observaciones: son la misma repetida.
+#
+# Por eso se lee junto con la antigüedad y nunca sin ella. Quien quiera serie
+# continua la tiene; quien modele con rezagos filtra por antigüedad = 0. Lo que
+# no se puede es publicar la capa sola, que es como un tramo plano se vuelve
+# "la luz no cambió".
+DATASET_RELLENADO = "Gap_Filled_DNB_BRDF-Corrected_NTL"
+DATASET_ANTIGUEDAD = "Latest_High_Quality_Retrieval"
+
 IMAGE_PATH = DATASETS_RADIANCIA[0]
 
 # Where the downloaded HDF5 files (hundreds of MB each) are staged.

@@ -17,7 +17,14 @@ from typing import Tuple
 
 import numpy as np
 
-from .config import BANDERA_CALIDAD, CALIDAD_ACEPTABLE, PRODUCTO, find_image_path
+from .config import (
+    BANDERA_CALIDAD,
+    CALIDAD_ACEPTABLE,
+    DATASET_ANTIGUEDAD,
+    DATASET_RELLENADO,
+    PRODUCTO,
+    find_image_path,
+)
 
 
 def _buscar_hermano(hdf_file, dataset, nombre):
@@ -27,31 +34,29 @@ def _buscar_hermano(hdf_file, dataset, nombre):
     return hdf_file[ruta] if ruta in hdf_file else None
 
 
-def leer_radianza(hdf_file) -> Tuple[np.ndarray, dict]:
-    """
-    Devuelve la radianza en unidades físicas, con NaN donde no hay medición.
+def _atributo(attrs, nombre, defecto=None):
+    valor = attrs.get(nombre, defecto)
+    if isinstance(valor, np.ndarray):
+        valor = valor.item() if valor.size == 1 else valor
+    return valor
 
-    Args:
-        hdf_file: Archivo HDF5 abierto
 
-    Returns:
-        Tuple con (matriz float64 en nW/(cm² sr), metadatos de la lectura)
+def _escalar(dataset) -> Tuple[np.ndarray, np.ndarray, dict]:
     """
-    dataset = hdf_file[find_image_path(hdf_file)]
+    Aplica escala, desplazamiento y relleno a un dataset del gránulo.
+
+    Devuelve (valores en unidades físicas, máscara de válidos, metadatos). No
+    mira la bandera de calidad: eso lo decide quien llama, porque la capa
+    rellenada existe precisamente para los píxeles que la bandera descarta.
+    """
     crudo = dataset[()]
     attrs = dataset.attrs
 
-    def atributo(nombre, defecto=None):
-        valor = attrs.get(nombre, defecto)
-        if isinstance(valor, np.ndarray):
-            valor = valor.item() if valor.size == 1 else valor
-        return valor
-
-    relleno = atributo("_FillValue")
-    minimo = atributo("valid_min")
-    maximo = atributo("valid_max")
-    escala = float(atributo("scale_factor", 1.0))
-    desplazamiento = float(atributo("add_offset", 0.0))
+    relleno = _atributo(attrs, "_FillValue")
+    minimo = _atributo(attrs, "valid_min")
+    maximo = _atributo(attrs, "valid_max")
+    escala = float(_atributo(attrs, "scale_factor", 1.0))
+    desplazamiento = float(_atributo(attrs, "add_offset", 0.0))
 
     valido = np.ones(crudo.shape, dtype=bool)
     if relleno is not None:
@@ -65,6 +70,85 @@ def leer_radianza(hdf_file) -> Tuple[np.ndarray, dict]:
         valido &= crudo >= minimo
     if maximo is not None:
         valido &= crudo <= maximo
+
+    unidades = _atributo(attrs, "units", "")
+    if isinstance(unidades, bytes):
+        unidades = unidades.decode(errors="replace")
+
+    return crudo, valido, {
+        "escala": escala,
+        "desplazamiento": desplazamiento,
+        "unidades": unidades,
+    }
+
+
+def _componer(crudo, valido, meta) -> np.ndarray:
+    """Matriz float64 en unidades físicas, con NaN donde no hay medición."""
+    salida = np.full(crudo.shape, np.nan, dtype=np.float64)
+    salida[valido] = (
+        crudo[valido].astype(np.float64) * meta["escala"] + meta["desplazamiento"]
+    )
+    return salida
+
+
+def leer_rellenada(hdf_file) -> Tuple[np.ndarray, dict] | None:
+    """
+    La capa rellenada por la NASA, o None si el gránulo no la trae.
+
+    **No se le aplica la bandera de calidad**, a diferencia de `leer_radianza`.
+    Filtrarla por la bandera la dejaría vacía exactamente en los días para los
+    que existe: donde la bandera dice 255 (sin recuperación) es donde esta capa
+    arrastra el último valor bueno. Su propio `_FillValue` es el criterio.
+
+    Léela siempre junto a `leer_antiguedad`. Un valor de esta capa sin su
+    antigüedad no dice si se midió esa noche o hace seis días, y esos dos
+    números se grafican igual.
+    """
+    dataset = _buscar_hermano(hdf_file, hdf_file[find_image_path(hdf_file)], DATASET_RELLENADO)
+    if dataset is None:
+        return None
+    crudo, valido, meta = _escalar(dataset)
+    return _componer(crudo, valido, meta), {
+        "unidades": meta["unidades"],
+        "fraccion_valida": float(valido.mean()),
+    }
+
+
+def leer_antiguedad(hdf_file) -> np.ndarray | None:
+    """
+    Días transcurridos desde la última recuperación de alta calidad, por píxel.
+
+    0 significa que el valor de la capa rellenada se midió esa misma noche, y
+    entonces coincide con el algoritmo principal. NaN donde el gránulo no lo
+    declara. Es lo único que distingue una serie continua de una serie continua
+    e inventada.
+    """
+    dataset = _buscar_hermano(
+        hdf_file, hdf_file[find_image_path(hdf_file)], DATASET_ANTIGUEDAD
+    )
+    if dataset is None:
+        return None
+    crudo, valido, meta = _escalar(dataset)
+    return _componer(crudo, valido, meta)
+
+
+def leer_radianza(hdf_file) -> Tuple[np.ndarray, dict]:
+    """
+    Devuelve la radianza en unidades físicas, con NaN donde no hay medición.
+
+    Es la capa del algoritmo principal, filtrada por la bandera de calidad: solo
+    trae píxeles medidos esa noche. Para un valor todos los días, ver
+    `leer_rellenada`, que hay que leer junto con `leer_antiguedad`.
+
+    Args:
+        hdf_file: Archivo HDF5 abierto
+
+    Returns:
+        Tuple con (matriz float64 en nW/(cm² sr), metadatos de la lectura)
+    """
+    dataset = hdf_file[find_image_path(hdf_file)]
+    crudo, valido, meta = _escalar(dataset)
+    escala, desplazamiento = meta["escala"], meta["desplazamiento"]
 
     # VNP46A2 marca por píxel si la recuperación sirve, y sin eso una noche
     # nublada entrega un número plausible que no es luz del suelo: el 5 de enero
@@ -82,12 +166,8 @@ def leer_radianza(hdf_file) -> Tuple[np.ndarray, dict]:
         )
     valido &= calidad[()] == CALIDAD_ACEPTABLE
 
-    radianza = np.full(crudo.shape, np.nan, dtype=np.float64)
-    radianza[valido] = crudo[valido].astype(np.float64) * escala + desplazamiento
-
-    unidades = atributo("units", "")
-    if isinstance(unidades, bytes):
-        unidades = unidades.decode(errors="replace")
+    radianza = _componer(crudo, valido, meta)
+    unidades = meta["unidades"]
 
     return radianza, {
         "producto": PRODUCTO,
