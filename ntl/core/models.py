@@ -105,6 +105,29 @@ class CoordenadasPixeles(BaseModel):
         """Área del municipio en píxeles de la retícula original, sumando piezas."""
         return sum(pieza.area for pieza in self.piezas)
 
+class MetricasCapa(BaseModel):
+    """
+    Los mismos agregados que `MedicionResultado`, para una capa alternativa.
+
+    Existe para que la capa rellenada se publique con exactamente las mismas
+    estadísticas que la principal en vez de con un par de campos sueltos: quien
+    compare las dos compara lo mismo.
+    """
+
+    Cantidad_de_pixeles: float = Field(..., description="Área en píxeles con valor en esta capa")
+    Suma_de_radianza: float
+    Media_de_radianza: float
+    Desviacion_estandar_de_radianza: float
+    Maximo_de_radianza: float
+    Minimo_de_radianza: float
+    Percentil_25_de_radianza: float
+    Percentil_50_de_radianza: float
+    Percentil_75_de_radianza: float
+    Fraccion_valida: float = Field(
+        ..., description="Fracción del área del municipio con valor en esta capa"
+    )
+
+
 class BboxRecorte(BaseModel):
     min_x: int = Field(..., description="Minimum x coordinate")
     max_x: int = Field(..., description="Maximum x coordinate")
@@ -201,5 +224,47 @@ class MedicionResultado(BaseModel):
             "Fraction of each pixel of the cropped matrix that falls inside the "
             "municipality, in [0, 1]. Weight these to reproduce the aggregate metrics."
         ),
+    )
+
+    # --- Capa rellenada ---
+    #
+    # La NASA publica, junto a la medición, una capa que arrastra la última
+    # recuperación buena donde no hubo ninguna. Da un valor todos los días, y
+    # por eso mismo dos días seguidos sin recuperación traen el MISMO valor:
+    # medido sobre Cuauhtémoc, el 1 y el 2 de septiembre de 2026 coinciden en
+    # los 198 píxeles con diferencia 0.0.
+    #
+    # Se publica siempre con su antigüedad al lado. Un agregado de esta capa sin
+    # `Antiguedad_mediana_dias` no dice si se midió esa noche o hace seis, y
+    # ambos se grafican igual.
+    Radianza_rellenada: Optional[MetricasCapa] = Field(
+        None,
+        description=(
+            "Aggregates over Gap_Filled_DNB_BRDF-Corrected_NTL: the same value as the "
+            "main algorithm where it retrieved, the last good retrieval carried "
+            "forward where it did not. Present on days the main layer is empty, which "
+            "is what makes a daily series continuous. Consecutive carried-forward days "
+            "repeat the same observation: read Antiguedad_mediana_dias before treating "
+            "them as independent."
+        ),
+    )
+    Antiguedad_mediana_dias: Optional[float] = Field(
+        None,
+        description=(
+            "Area-weighted median of Latest_High_Quality_Retrieval, in days. 0 means "
+            "the filled layer was measured that night and equals the main layer; N "
+            "means it is an observation from N days ago, repeated."
+        ),
+    )
+    Fraccion_medida: Optional[float] = Field(
+        None,
+        description=(
+            "Fraction of the municipality whose filled value was actually measured "
+            "that night (age 0). The complement is carried forward. Filter on this "
+            "for a series of genuine daily observations."
+        ),
+    )
+    Matriz_rellenada: Optional[List[List[Optional[float]]]] = Field(
+        None, description="Cropped Gap_Filled radiance matrix (Filas x Columnas)"
     )
     
