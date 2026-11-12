@@ -2,7 +2,7 @@
 Cobertura por píxel → métricas de radianza.
 
 Etapa que corre todos los días: aplica las coberturas ya calculadas a cada
-imagen VNP46A2, descargando en paralelo y agrupando por cuadrante.
+imagen Black Marble (VJ146A2 / VNP46A2), descargando en paralelo y agrupando por cuadrante.
 """
 
 from .extraccion import extract_radiance_matrix

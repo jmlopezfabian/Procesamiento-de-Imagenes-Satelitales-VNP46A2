@@ -102,3 +102,21 @@ class TestMunicipioQueNoCabeEnElCuadrante:
 
         dentro = Polygon([(10, 10), (30, 10), (30, 30), (10, 30)])
         _verificar_que_cabe(dentro, (2400, 2400), "Sintetico", "h08v07")
+
+
+class TestProductoEnElProcesador:
+    def test_fuera_de_vigencia_no_pide_nada(self):
+        with patch("ntl.geometria.processor.find_file") as find:
+            proc = SatelliteProcessor("Iztapalapa", producto="VNP46A2")
+            assert proc.get_measures("03-11-26", "h08v07", show_plots=False) is None
+        find.assert_not_called()
+
+    def test_el_producto_se_pasa_a_find_file(self):
+        with patch("ntl.geometria.processor.find_file", return_value=None) as find:
+            SatelliteProcessor("Iztapalapa", producto="VNP46A2").get_measures(
+                "01-01-24", "h08v07", show_plots=False)
+        assert find.call_args.args[3].nombre == "VNP46A2"
+
+    def test_producto_invalido_falla_al_construir(self):
+        with pytest.raises(ValueError, match="no soportado"):
+            SatelliteProcessor("Iztapalapa", producto="VNP46A1")

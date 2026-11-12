@@ -5,8 +5,11 @@ import pytest
 
 from ntl.core.downloader import find_file_async, download_file_async
 
+# Firma HDF5 + relleno: la ruta async rechaza lo que no empiece así.
+H5 = b"\x89HDF\r\n\x1a\n" + b"contenido de prueba"
 
-def _make_resp(status=200, text="", content_bytes=None, content_length="auto"):
+
+def _make_resp(status=200, text="", content_bytes=None, content_length="auto", json_datos=None):
     """
     Respuesta falsa.
 
@@ -19,6 +22,7 @@ def _make_resp(status=200, text="", content_bytes=None, content_length="auto"):
     resp = MagicMock()
     resp.status = status
     resp.text = AsyncMock(return_value=text)
+    resp.json = AsyncMock(return_value=json_datos)
     if content_bytes is not None:
         resp.content.read = AsyncMock(side_effect=[content_bytes, b""])
     else:
@@ -29,38 +33,26 @@ def _make_resp(status=200, text="", content_bytes=None, content_length="auto"):
     return resp
 
 
+def _sesion_json(datos, status=200):
+    session = MagicMock()
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=_make_resp(status, json_datos=datos))
+    ctx.__aexit__ = AsyncMock(return_value=None)
+    session.get = MagicMock(return_value=ctx)
+    return session
+
+
 @pytest.mark.asyncio
 class TestFindFileAsync:
-    async def test_returns_url_when_html_has_h5_link(self, sample_directory_html):
-        session = MagicMock()
-        ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(return_value=_make_resp(200, sample_directory_html))
-        ctx.__aexit__ = AsyncMock(return_value=None)
-        session.get = MagicMock(return_value=ctx)
-        url = await find_file_async(session, 2024, 1, "h08v07")
-        assert url is not None
-        assert "h08v07" in url
-        assert url.endswith(".h5")
+    async def test_devuelve_la_url_del_cuadrante(self, sample_listado_json):
+        url = await find_file_async(_sesion_json(sample_listado_json), 2024, 1, "h08v07")
+        assert url.endswith("VJ146A2.A2024001.h08v07.002.2024003022532.h5")
 
     async def test_returns_none_when_status_not_200(self):
-        session = MagicMock()
-        ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(return_value=_make_resp(404, ""))
-        ctx.__aexit__ = AsyncMock(return_value=None)
-        session.get = MagicMock(return_value=ctx)
-        url = await find_file_async(session, 2024, 1, "h08v07")
-        assert url is None
+        assert await find_file_async(_sesion_json(None, 404), 2024, 1, "h08v07") is None
 
-    async def test_returns_none_when_no_matching_link(self):
-        session = MagicMock()
-        ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(
-            return_value=_make_resp(200, "<html><body><a href='other.h5'>x</a></body></html>")
-        )
-        ctx.__aexit__ = AsyncMock(return_value=None)
-        session.get = MagicMock(return_value=ctx)
-        url = await find_file_async(session, 2024, 1, "h99v99")
-        assert url is None
+    async def test_returns_none_when_no_matching_link(self, sample_listado_json):
+        assert await find_file_async(_sesion_json(sample_listado_json), 2024, 1, "h99v99") is None
 
 
 @pytest.mark.asyncio
@@ -69,13 +61,13 @@ class TestDownloadFileAsync:
         path = str(tmp_path / "out.h5")
         session = MagicMock()
         ctx = MagicMock()
-        resp = _make_resp(200, "", content_bytes=b"binary content here")
+        resp = _make_resp(200, "", content_bytes=H5)
         ctx.__aenter__ = AsyncMock(return_value=resp)
         ctx.__aexit__ = AsyncMock(return_value=None)
         session.get = MagicMock(return_value=ctx)
         result = await download_file_async(session, "http://example.com/file.h5", path)
         assert result == path
-        assert (tmp_path / "out.h5").read_bytes() == b"binary content here"
+        assert (tmp_path / "out.h5").read_bytes() == H5
 
     async def test_returns_none_when_status_not_200(self, tmp_path):
         path = str(tmp_path / "out.h5")
@@ -111,7 +103,7 @@ class TestUnaDescargaAMediasNoSeDaPorBuena:
     async def test_si_llegan_menos_bytes_de_los_anunciados_no_hay_archivo(self, tmp_path):
         path = str(tmp_path / "out.h5")
         # El servidor anuncia 500 MB y manda 19 bytes.
-        resp = _make_resp(200, "", content_bytes=b"binary content here",
+        resp = _make_resp(200, "", content_bytes=H5,
                           content_length=500_000_000)
         result = await download_file_async(
             self._sesion(resp), "http://example.com/f.h5", path, max_retries=1)
@@ -135,13 +127,13 @@ class TestUnaDescargaAMediasNoSeDaPorBuena:
     async def test_un_servidor_sin_content_length_sigue_funcionando(self, tmp_path):
         """No todos los servidores lo anuncian; sin él no se puede comprobar."""
         path = str(tmp_path / "out.h5")
-        resp = _make_resp(200, "", content_bytes=b"binary content here",
+        resp = _make_resp(200, "", content_bytes=H5,
                           content_length=None)
         result = await download_file_async(
             self._sesion(resp), "http://example.com/f.h5", path)
 
         assert result == path
-        assert (tmp_path / "out.h5").read_bytes() == b"binary content here"
+        assert (tmp_path / "out.h5").read_bytes() == H5
 
     async def test_en_la_ruta_final_nunca_aparece_un_archivo_a_medias(self, tmp_path):
         """
@@ -153,9 +145,9 @@ class TestUnaDescargaAMediasNoSeDaPorBuena:
 
         async def leer_espiando(n=8192):
             visto.append(sorted(p.name for p in tmp_path.iterdir()))
-            return b"" if len(visto) > 2 else b"x" * 10
+            return b"" if len(visto) > 2 else H5[:13]+b"abc"
 
-        resp = _make_resp(200, "", content_length=20)
+        resp = _make_resp(200, "", content_length=32)
         resp.content.read = AsyncMock(side_effect=leer_espiando)
 
         result = await download_file_async(
@@ -178,9 +170,9 @@ class TestUnaDescargaAMediasNoSeDaPorBuena:
             estado["intento"] += 1
             if estado["intento"] == 1:
                 return AsyncMock(side_effect=[b"corto", b""])
-            return AsyncMock(side_effect=[b"contenido completo", b""])
+            return AsyncMock(side_effect=[H5, b""])
 
-        resp = _make_resp(200, "", content_length=18)
+        resp = _make_resp(200, "", content_length=len(H5))
         resp.content.read = nueva_lectura()
 
         session = MagicMock()
@@ -199,5 +191,5 @@ class TestUnaDescargaAMediasNoSeDaPorBuena:
             session, "http://example.com/f.h5", path, max_retries=3, delay=0)
 
         assert result == path
-        assert (tmp_path / "out.h5").read_bytes() == b"contenido completo"
+        assert (tmp_path / "out.h5").read_bytes() == H5
         assert list(tmp_path.glob("*.part")) == []

@@ -1,3 +1,4 @@
+import math
 import os
 import tempfile
 from dotenv import load_dotenv
@@ -24,16 +25,27 @@ def _primera_definida(*nombres: str) -> str | None:
 
 # Producto de Black Marble del que se lee la radianza.
 #
-# VNP46A2: la escena corregida por reflectancia bidireccional lunar y atmósfera,
-# con Mandatory_Quality_Flag por píxel.
+# Los productos soportados viven en `ntl.core.productos` (VNP46A2 de Suomi NPP,
+# que termina el 2026-11-02, y VJ146A2 de NOAA-20, vigente). Ambos son versiones
+# corregidas por reflectancia bidireccional lunar y atmósfera, con
+# Mandatory_Quality_Flag por píxel. Por omisión se usa VJ146A2; NTL_PRODUCTO lo
+# cambia. `PRODUCTO` se conserva por compatibilidad como el NOMBRE del producto
+# por omisión al importar; el código interno resuelve un `Producto` con
+# `productos.obtener_producto` y construye las URLs desde él.
 #
-# No hay alternativa configurable. VNP46A1 entrega radianza cruda al sensor, sin
+# VNP46A1 sigue explícitamente fuera. Entrega radianza cruda al sensor, sin
 # corregir y sin ninguna bandera que permita descartar una observación
 # inservible: una noche completamente nublada produce un valor plausible que no
 # es luz del suelo. Dejarlo disponible como opción invitaba a producir series
 # que parecen válidas y no lo son.
-PRODUCTO = "VNP46A2"
+PRODUCTO = _primera_definida("NTL_PRODUCTO") or "VJ146A2"
 
+# API JSON de LAADS con el listado de archivos de un día. Es módulo-nivel para
+# que las pruebas la apunten a un servidor local.
+LAADS_API_BASE = "https://ladsweb.modaps.eosdis.nasa.gov/api/v2/content/details/allData"
+
+# DEPRECADO: plantilla del listado HTML antiguo, solo por si algo externo la
+# importa. Nada de ntl la usa: las URLs salen de `Producto.url_listado`.
 BASE_URL = (
     "https://ladsweb.modaps.eosdis.nasa.gov/archive/allData/5200/"
     f"{PRODUCTO}/{{year}}/{{day}}/"
@@ -68,7 +80,7 @@ DATASET_ANTIGUEDAD = "Latest_High_Quality_Retrieval"
 
 IMAGE_PATH = DATASETS_RADIANCIA[0]
 
-# Where the downloaded HDF5 files (hundreds of MB each) are staged.
+# Where the downloaded HDF5 files (10–30 MB each; ~16 MB for the Mexico tiles) are staged.
 #
 # This used to be the literal relative path "../temp", which resolved against
 # whatever the current working directory happened to be — so the same code
@@ -95,7 +107,7 @@ def temp_path(filename: str) -> Path:
 # primera descarga hasta que termina su último municipio, así que el pico de
 # disco es:
 #
-#     pico ≈ MAX_FECHAS_CONCURRENTES × cuadrantes de la región × ~250 MB
+#     pico ≈ MAX_FECHAS_CONCURRENTES × cuadrantes de la región × ~16 MB (tiles de México; el mayor del día ronda 30 MB)
 #
 # Sin este límite se lanzaba una tarea por fecha y todas descargaban a la vez:
 # un año de una región de dos cuadrantes son 730 gránulos simultáneos. El
@@ -103,6 +115,38 @@ def temp_path(filename: str) -> Path:
 # para cuidar el disco, y desde que un municipio puede necesitar cuatro
 # cuadrantes en vez de uno el margen es cuatro veces menor.
 MAX_FECHAS_CONCURRENTES = int(_primera_definida("NTL_MAX_FECHAS_CONCURRENTES") or 4)
+
+
+# Límites hacia LAADS DAAC.
+#
+# NASA limita las peticiones por usuario y responde 429/503 cuando se las pasa.
+# Antes el único freno era el semáforo de fechas, que cuenta fechas y no
+# peticiones, y cada instancia tenía el suyo: dos corridas a la vez sumaban sus
+# descargas sin que nadie las contara. Estos valores gobiernan un limitador
+# global por proceso (ver core.limitador).
+#
+# MAX_DESCARGAS: gránulos (~10–30 MB) bajándose a la vez.
+# MAX_PETICIONES_POR_SEG: ritmo de TODA petición, listados incluidos.
+# MAX_INTENTOS / BACKOFF_*: reintentos ante errores transitorios, con espera
+#   exponencial (base · 2^n) y tope; un Retry-After del servidor manda sobre ella.
+MAX_DESCARGAS = max(1, int(_primera_definida("NTL_MAX_DESCARGAS") or 4))
+# NTL_MAX_PETICIONES_POR_SEG=0 desactiva el límite de ritmo (queda el de descargas
+# simultáneas y la pausa ante 429/503); un valor negativo es un error de
+# configuración y se rechaza al importar en vez de fallar a mitad de una corrida.
+# Tampoco valen nan (`nan < 0` es False y se colaba, y el bucket del limitador se
+# volvía NaN) ni inf (el bucket haría 0·inf = nan): «sin límite» se pide con 0.
+MAX_PETICIONES_POR_SEG = float(_primera_definida("NTL_MAX_PETICIONES_POR_SEG") or 2)
+if not (math.isfinite(MAX_PETICIONES_POR_SEG) and MAX_PETICIONES_POR_SEG >= 0):
+    raise ValueError(
+        f"NTL_MAX_PETICIONES_POR_SEG={MAX_PETICIONES_POR_SEG} no es válido: usa un "
+        f"número finito positivo, o 0 para no limitar el ritmo")
+MAX_INTENTOS = max(1, int(_primera_definida("NTL_MAX_INTENTOS") or 5))
+BACKOFF_BASE = float(_primera_definida("NTL_BACKOFF_BASE") or 2)
+BACKOFF_TOPE = float(_primera_definida("NTL_BACKOFF_TOPE") or 120)
+# Cuánto se recuerda que el listado de un día respondió 404 (s). Un día aún no
+# publicado da 404 y se publica después: recordarlo para siempre lo dejaría como
+# «sin datos» en cualquier proceso largo. 0 = no recordarlo.
+TTL_LISTADO_404 = max(0.0, float(_primera_definida("NTL_TTL_LISTADO_404") or 600))
 
 
 # Where the Parquet results are written.

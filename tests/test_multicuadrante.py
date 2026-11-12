@@ -103,7 +103,7 @@ def radianza_sintetica(x_global, y_global):
 
 
 def crear_cuadrante(directorio, cuadrante, relleno=False, calidad_mala=False,
-                    forma=None):
+                    forma=None, producto="VNP46A2"):
     """
     HDF5 mínimo con la forma de VNP46A2, georreferenciado donde dice estar.
 
@@ -128,6 +128,7 @@ def crear_cuadrante(directorio, cuadrante, relleno=False, calidad_mala=False,
 
     ruta = directorio / f"{cuadrante}.h5"
     with h5py.File(ruta, "w") as f:
+        f.attrs["ShortName"] = producto.encode()
         grupo = f.create_group("HDFEOS/GRIDS/VIIRS_Grid_DNB_2d/Data Fields")
         ds = grupo.create_dataset("DNB_BRDF-Corrected_NTL", data=matriz)
         ds.attrs["_FillValue"] = np.float32(-999.9)
@@ -569,6 +570,38 @@ class TestNoHayMedicionVsNoSePuedeMedir:
         with pytest.raises(MedicionImposible, match="retículas distintas"):
             process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
                                   delete_files=False)
+
+    def test_el_producto_del_registro_sale_del_archivo(self, tmp_path):
+        coords = cuadrado(ESQUINA, 1.3)
+        piezas = cobertura_por_cuadrante(coords, FORMA)
+        rutas = {c: crear_cuadrante(tmp_path, c, producto="VJ146A2") for c in piezas}
+        r = process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
+                                  delete_files=False)
+        assert r.Producto == "VJ146A2"
+
+    def test_cuadrantes_de_productos_distintos_no_se_mezclan(self, tmp_path):
+        coords = cuadrado(ESQUINA, 1.3)
+        piezas = cobertura_por_cuadrante(coords, FORMA)
+        rutas = {c: crear_cuadrante(tmp_path, c) for c in piezas}
+        otro = tmp_path / "otro"
+        otro.mkdir()
+        ultimo = list(piezas)[-1]
+        rutas[ultimo] = crear_cuadrante(otro, ultimo, producto="VJ146A2")
+        with pytest.raises(MedicionImposible, match="productos distintos"):
+            process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
+                                  delete_files=False)
+
+    def test_producto_pedido_distinto_al_del_archivo_es_medicion_imposible(self, tmp_path):
+        coords = cuadrado(ESQUINA, 1.3)
+        piezas = cobertura_por_cuadrante(coords, FORMA)
+        rutas = {c: crear_cuadrante(tmp_path, c, producto="VNP46A2") for c in piezas}
+        with pytest.raises(MedicionImposible, match="se pidió VJ146A2"):
+            process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
+                                  delete_files=False, producto="VJ146A2")
+        # Si coincide, o no se pide ninguno (compatibilidad), se mide igual.
+        for pedido in ("VNP46A2", None):
+            assert process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
+                                         delete_files=False, producto=pedido) is not None
 
     def test_un_defecto_inesperado_propaga(self, tmp_path, monkeypatch):
         """

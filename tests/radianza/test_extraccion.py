@@ -166,6 +166,7 @@ def hdf5_georreferenciado(tmp_path):
         "GridOrigin=HE5_HDFE_GD_UL\n"
     )
     with h5py.File(ruta, "w") as f:
+        f.attrs["ShortName"] = b"VNP46A2"
         grupo = f.create_group("HDFEOS/GRIDS/VIIRS_Grid_DNB_2d/Data Fields")
         ds = grupo.create_dataset(
             "DNB_BRDF-Corrected_NTL",

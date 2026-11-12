@@ -9,7 +9,7 @@ Ignorar el relleno no es un detalle: en el histórico hay cuatro fechas en las q
 el cuadrante completo venía relleno, y como 65535 se sumó como si fuera radianza,
 esos registros salieron con sumas 229 veces mayores que las normales.
 
-A eso se suma `Mandatory_Quality_Flag`, que VNP46A2 publica por píxel y que aquí
+A eso se suma `Mandatory_Quality_Flag`, que VNP46A2 y VJ146A2 publican por píxel y que aquí
 es obligatoria: un archivo que no la traiga se rechaza en vez de procesarse sin
 filtrar.
 """
@@ -22,9 +22,9 @@ from .config import (
     CALIDAD_ACEPTABLE,
     DATASET_ANTIGUEDAD,
     DATASET_RELLENADO,
-    PRODUCTO,
     find_image_path,
 )
+from .productos import PRODUCTOS
 
 
 def _buscar_hermano(hdf_file, dataset, nombre):
@@ -39,6 +39,27 @@ def _atributo(attrs, nombre, defecto=None):
     if isinstance(valor, np.ndarray):
         valor = valor.item() if valor.size == 1 else valor
     return valor
+
+
+def producto_del_archivo(hdf_file) -> str:
+    """
+    Producto al que pertenece el gránulo, según su atributo raíz `ShortName`.
+
+    El archivo es la fuente de verdad, no la configuración: así el `Producto` de
+    cada registro dice de dónde salió la radianza aunque la corrida se haya
+    pedido distinto. Un `ShortName` ausente o fuera de PRODUCTOS (VNP46A1, por
+    ejemplo, que no trae bandera de calidad) se rechaza.
+    """
+    crudo = _atributo(hdf_file.attrs, "ShortName")
+    if isinstance(crudo, bytes):
+        crudo = crudo.decode(errors="replace")
+    nombre = str(crudo).strip() if crudo is not None else ""
+    if nombre not in PRODUCTOS:
+        raise ValueError(
+            f"El archivo declara ShortName={nombre or 'ausente'!r}, que no es un "
+            f"producto soportado ({', '.join(PRODUCTOS)}). VNP46A1 no se admite: "
+            f"radianza cruda, sin bandera de calidad.")
+    return nombre
 
 
 def _escalar(dataset) -> Tuple[np.ndarray, np.ndarray, dict]:
@@ -60,7 +81,7 @@ def _escalar(dataset) -> Tuple[np.ndarray, np.ndarray, dict]:
 
     valido = np.ones(crudo.shape, dtype=bool)
     if relleno is not None:
-        # El relleno de VNP46A2 es -999.9 en punto flotante; compararlo con
+        # El relleno de VNP46A2/VJ146A2 es -999.9 en punto flotante; compararlo con
         # igualdad exacta es frágil, así que se usa una vecindad.
         if np.issubdtype(crudo.dtype, np.floating):
             valido &= np.abs(crudo - float(relleno)) > 1e-3
@@ -146,11 +167,12 @@ def leer_radianza(hdf_file) -> Tuple[np.ndarray, dict]:
     Returns:
         Tuple con (matriz float64 en nW/(cm² sr), metadatos de la lectura)
     """
+    producto = producto_del_archivo(hdf_file)
     dataset = hdf_file[find_image_path(hdf_file)]
     crudo, valido, meta = _escalar(dataset)
     escala, desplazamiento = meta["escala"], meta["desplazamiento"]
 
-    # VNP46A2 marca por píxel si la recuperación sirve, y sin eso una noche
+    # VNP46A2/VJ146A2 marcan por píxel si la recuperación sirve, y sin eso una noche
     # nublada entrega un número plausible que no es luz del suelo: el 5 de enero
     # de 2025, Iztapalapa estaba 100% nublado y VNP46A1 daba 62,838.
     #
@@ -161,7 +183,7 @@ def leer_radianza(hdf_file) -> Tuple[np.ndarray, dict]:
     if calidad is None:
         raise ValueError(
             f"El archivo no trae {BANDERA_CALIDAD}: no parece un producto "
-            f"{PRODUCTO}. Sin la bandera de calidad no hay forma de distinguir "
+            f"{producto}. Sin la bandera de calidad no hay forma de distinguir "
             f"una noche despejada de una completamente nublada."
         )
     valido &= calidad[()] == CALIDAD_ACEPTABLE
@@ -170,7 +192,7 @@ def leer_radianza(hdf_file) -> Tuple[np.ndarray, dict]:
     unidades = meta["unidades"]
 
     return radianza, {
-        "producto": PRODUCTO,
+        "producto": producto,
         "escala": escala,
         "desplazamiento": desplazamiento,
         "unidades": unidades,

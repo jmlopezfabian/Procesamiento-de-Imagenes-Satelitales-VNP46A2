@@ -22,20 +22,10 @@ def fixtures_dir():
 
 
 @pytest.fixture
-def sample_directory_html(fixtures_dir):
-    """HTML content of a NASA directory listing with .h5 link for h08v07."""
-    path = fixtures_dir / "sample_directory.html"
-    return path.read_text(encoding="utf-8")
-
-
-@pytest.fixture
-def sample_directory_html_with_full_url():
-    """HTML with full URL in href (alternative format)."""
-    return """
-    <html><body>
-    <a href="https://ladsweb.modaps.eosdis.nasa.gov/archive/allData/5200/VNP46A2/2024/001/VNP46A2.A2024001.h08v07.002.2024003022532.h5">file</a>
-    </body></html>
-    """
+def sample_listado_json(fixtures_dir):
+    """Listado JSON de LAADS (details/allData) con los cuadrantes h08v07 y h09v07 de VJ146A2."""
+    import json
+    return json.loads((fixtures_dir / "sample_listado.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture
@@ -65,6 +55,8 @@ def sample_hdf5_path(tmp_path):
     )
 
     with h5py.File(h5_path, "w") as f:
+
+        f.attrs["ShortName"] = b"VNP46A2"
         grp = f.create_group(grupo)
         ds = grp.create_dataset("DNB_BRDF-Corrected_NTL", data=radiance)
         ds.attrs["_FillValue"] = np.float32(-999.9)
@@ -134,3 +126,70 @@ def mock_hdf5_file():
         raise KeyError(key)
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def red_sin_esperas(monkeypatch, entorno_ntl_limpio):
+    """
+    Descargas sin esperas reales y con un limitador nuevo en cada prueba.
+
+    Los reintentos duermen segundos de verdad y el bucket de peticiones va a
+    2/s: con ellos cada prueba de red tardaría lo que tarda NASA. `esperas`
+    recoge lo que el código habría dormido para poder comprobarlo.
+
+    Depende de `entorno_ntl_limpio` a propósito: éste fija las constantes de
+    config a sus valores por omisión y, si corriera después, devolvería el
+    bucket a 2/s pisando el 10 000 de aquí.
+    """
+    import ntl.core.config as config
+    import ntl.core.downloader as downloader
+    from ntl.core.limitador import reiniciar_limitador
+
+    esperas = []
+
+    async def _dormir(segundos):
+        esperas.append(segundos)
+
+    monkeypatch.setattr(downloader, "_dormir", _dormir)
+    monkeypatch.setattr(config, "MAX_PETICIONES_POR_SEG", 10_000.0)
+    reiniciar_limitador()
+    yield esperas
+    reiniciar_limitador()
+
+
+@pytest.fixture
+def esperas(red_sin_esperas):
+    """Lista de esperas (s) que los reintentos pidieron dormir."""
+    return red_sin_esperas
+
+
+@pytest.fixture(autouse=True)
+def entorno_ntl_limpio(monkeypatch):
+    """
+    Pruebas independientes del entorno de quien las corre.
+
+    `NTL_PRODUCTO` se lee al llamar (no al importar) y cambia el producto por
+    omisión: con `NTL_PRODUCTO=VNP46A2` exportada (o en un .env, que config
+    carga) fallaban 15 pruebas que esperan el VJ146A2 por omisión. Las pruebas
+    que necesitan un valor lo fijan ellas con `monkeypatch.setenv`.
+    """
+    import os
+    for nombre in [n for n in os.environ if n.startswith(("NTL_", "VNP46A1_"))]:
+        monkeypatch.delenv(nombre, raising=False)
+    # config lee NTL_* al importar: quitarlas del entorno no basta si ya estaban
+    # exportadas cuando se importó (NTL_MAX_INTENTOS=2, NTL_TTL_LISTADO_404=0,
+    # NTL_MAX_DESCARGAS=1... rompían pruebas que asumen los valores por omisión).
+    # Se fijan a los documentados en config.py; las pruebas que necesitan otro
+    # valor lo ajustan después con su propio monkeypatch.
+    import ntl.core.config as config
+    for nombre, valor in {
+        "PRODUCTO": "VJ146A2",
+        "MAX_FECHAS_CONCURRENTES": 4,
+        "MAX_DESCARGAS": 4,
+        "MAX_PETICIONES_POR_SEG": 2.0,
+        "MAX_INTENTOS": 5,
+        "BACKOFF_BASE": 2.0,
+        "BACKOFF_TOPE": 120.0,
+        "TTL_LISTADO_404": 600.0,
+    }.items():
+        monkeypatch.setattr(config, nombre, valor)

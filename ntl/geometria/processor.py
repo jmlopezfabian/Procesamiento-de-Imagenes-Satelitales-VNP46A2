@@ -13,6 +13,7 @@ from ..core.lectura import leer_radianza
 from ..core.models import MedicionResultado
 from ..core.utils import parse_date, extraer_geometria, left_right_coords
 from ..core.downloader import find_file, download_file
+from ..core.productos import obtener_producto
 from .cobertura import cobertura_exacta, metricas_ponderadas, poligono_en_pixeles
 
 pd.set_option('display.max_columns', None)
@@ -43,11 +44,14 @@ def _verificar_que_cabe(poligono, forma, municipio, cuadrante):
 
 class SatelliteProcessor:
     """
-    Clase principal para procesar imágenes satelitales del producto VNP46A2.
+    Clase principal para procesar imágenes satelitales de Black Marble (VNP46A2 o VJ146A2).
     """
     
-    def __init__(self, municipio: str):
+    def __init__(self, municipio: str, producto=None):
         self.municipio = municipio
+        # None = el por omisión (NTL_PRODUCTO o VJ146A2), resuelto ya para que
+        # un nombre inválido falle al construir y no a media corrida.
+        self.producto = obtener_producto(producto)
     
     def _save_plot(self, fig, date_obj: str, quadrant: str, plot_type: str = "analysis"):
         """
@@ -69,6 +73,26 @@ class SatelliteProcessor:
         finally:
             plt.close(fig)
     
+    def _buscar_y_bajar(self, year, day, date_obj, quadrant) -> Optional[str]:
+        """Ruta del .h5 descargado, o None (con el motivo impreso) si no se pudo."""
+        motivo = self.producto.motivo_fuera_de_rango(date_obj)
+        if motivo:
+            # Sin red: la fecha no está en la vigencia del producto.
+            print(f"{motivo}; no se pide a NASA.")
+            return None
+        h5_url = find_file(year, day, quadrant, self.producto)
+        if not h5_url:
+            print("No se encontró el archivo.")
+            return None
+
+        save_path = str(temp_path(
+            f"{date_obj}_{self.producto.nombre}_{self.municipio}_{quadrant}.h5"))
+        h5_save_path = download_file(h5_url, save_path)
+        if not h5_save_path:
+            print("Fallo la descarga del archivo.")
+            return None
+        return h5_save_path
+
     def get_measures(self, date_str: str, quadrant: str, show_plots: bool = True) -> Optional[dict]:
         """
         Consulta, descarga y extrae las coordenadas de una imagen satelital para un día y cuadrante.
@@ -84,15 +108,8 @@ class SatelliteProcessor:
         year, day, date_obj = parse_date(date_str)
 
         # Buscar y descargar archivo
-        h5_url = find_file(year, day, quadrant)
-        if not h5_url:
-            print("No se encontró el archivo.")
-            return None
-
-        save_path = str(temp_path(f"{date_obj}_{self.municipio}_{quadrant}.h5"))
-        h5_save_path = download_file(h5_url, save_path)
+        h5_save_path = self._buscar_y_bajar(year, day, date_obj, quadrant)
         if not h5_save_path:
-            print("Fallo la descarga del archivo.")
             return None
         
         with h5py.File(h5_save_path, "r") as hdf_file:
@@ -261,15 +278,8 @@ class SatelliteProcessor:
         """
         year, day, date_obj = parse_date(date_str)
 
-        h5_url = find_file(year, day, quadrant)
-        if not h5_url:
-            print("No se encontró el archivo.")
-            return None
-
-        save_path = str(temp_path(f"{date_obj}_{self.municipio}_{quadrant}.h5"))
-        h5_save_path = download_file(h5_url, save_path)
+        h5_save_path = self._buscar_y_bajar(year, day, date_obj, quadrant)
         if not h5_save_path:
-            print("Fallo la descarga del archivo.")
             return None
 
         with h5py.File(h5_save_path, "r") as hdf_file:

@@ -1,0 +1,22 @@
+{
+  "content": [
+    {
+      "downloadsLink": "https://ladsweb.modaps.eosdis.nasa.gov/api/v2/content/archives/allData/5200/VJ146A2/2024/001/VJ146A2.A2024001.h08v07.002.2024003022532.h5",
+      "mtime": 1704400000,
+      "name": "VJ146A2.A2024001.h08v07.002.2024003022532.h5",
+      "resourceType": "File",
+      "self": "https://ladsweb.modaps.eosdis.nasa.gov/api/v2/content/details/allData/5200/VJ146A2/2024/001/VJ146A2.A2024001.h08v07.002.2024003022532.h5",
+      "size": 16780289,
+      "status": "Online"
+    },
+    {
+      "downloadsLink": "https://ladsweb.modaps.eosdis.nasa.gov/api/v2/content/archives/allData/5200/VJ146A2/2024/001/VJ146A2.A2024001.h09v07.002.2024003022532.h5",
+      "mtime": 1704400000,
+      "name": "VJ146A2.A2024001.h09v07.002.2024003022532.h5",
+      "resourceType": "File",
+      "self": "https://ladsweb.modaps.eosdis.nasa.gov/api/v2/content/details/allData/5200/VJ146A2/2024/001/VJ146A2.A2024001.h09v07.002.2024003022532.h5",
+      "size": 16780289,
+      "status": "Online"
+    }
+  ]
+}

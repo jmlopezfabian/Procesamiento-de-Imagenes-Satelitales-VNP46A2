@@ -58,4 +58,4 @@ class TestMetricasPonderadas:
 
         m = metricas_ponderadas(np.array([1.0, 2.0]), np.array([1.0, 0.5]))
         # No debe faltar ni sobrar ningún campo requerido
-        MedicionResultado(Fecha=date(2024, 1, 1), **m)
+        MedicionResultado(Fecha=date(2024, 1, 1), Producto="VJ146A2", **m)
