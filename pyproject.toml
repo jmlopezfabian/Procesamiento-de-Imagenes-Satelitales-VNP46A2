@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ntl"
-version = "0.10.0"
+version = "0.11.0"
 description = "Black Marble (VNP46A2 / VJ146A2) satellite nighttime radiance processing"
 requires-python = ">=3.11"
 dependencies = [
