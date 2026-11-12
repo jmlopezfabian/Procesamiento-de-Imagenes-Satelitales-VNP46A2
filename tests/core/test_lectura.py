@@ -17,7 +17,7 @@ RUTA = f"{GRUPO}/DNB_BRDF-Corrected_NTL"
 RUTA_CALIDAD = f"{GRUPO}/Mandatory_Quality_Flag"
 
 
-def _hdf5(tmp_path, datos, calidad=None, tipo=np.uint16, **attrs):
+def _hdf5(tmp_path, datos, calidad=None, tipo=np.uint16, producto=b"VNP46A2", **attrs):
     """
     Archivo con la forma de VNP46A2.
 
@@ -27,6 +27,8 @@ def _hdf5(tmp_path, datos, calidad=None, tipo=np.uint16, **attrs):
     datos = np.asarray(datos)
     ruta = tmp_path / "prueba.h5"
     with h5py.File(ruta, "w") as f:
+        if producto is not None:
+            f.attrs["ShortName"] = producto
         ds = f.create_dataset(RUTA, data=datos.astype(tipo))
         for k, v in attrs.items():
             ds.attrs[k] = v
@@ -153,7 +155,31 @@ class TestVNP46A2:
         """
         ruta = tmp_path / "sin_bandera.h5"
         with h5py.File(ruta, "w") as f:
+            f.attrs["ShortName"] = b"VNP46A2"
             f.create_dataset(RUTA, data=np.array([[10.0, 20.0]], dtype=np.float32))
         with h5py.File(ruta) as f:
             with pytest.raises(ValueError, match="Mandatory_Quality_Flag"):
+                leer_radianza(f)
+
+
+class TestProductoDelArchivo:
+    """El producto sale del atributo raíz ShortName, no de la configuración."""
+
+    @pytest.mark.parametrize("corto", [b"VNP46A2", b"VJ146A2", "VJ146A2"])
+    def test_lo_toma_del_archivo(self, tmp_path, corto):
+        ruta = _hdf5(tmp_path, [[10, 20]], producto=corto)
+        with h5py.File(ruta) as f:
+            _, meta = leer_radianza(f)
+        assert meta["producto"] == (corto.decode() if isinstance(corto, bytes) else corto)
+
+    def test_vnp46a1_se_rechaza(self, tmp_path):
+        ruta = _hdf5(tmp_path, [[10, 20]], producto=b"VNP46A1")
+        with h5py.File(ruta) as f:
+            with pytest.raises(ValueError, match="VNP46A1.*VNP46A2, VJ146A2"):
+                leer_radianza(f)
+
+    def test_sin_shortname_se_rechaza(self, tmp_path):
+        ruta = _hdf5(tmp_path, [[10, 20]], producto=None)
+        with h5py.File(ruta) as f:
+            with pytest.raises(ValueError, match="ausente"):
                 leer_radianza(f)

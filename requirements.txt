@@ -33,8 +33,7 @@ python-dotenv>=1.0.0
 aiohttp>=3.8.0,<4.0.0
 nest_asyncio>=1.5.0
 
-# Web scraping
-beautifulsoup4>=4.10.0
+# Listados JSON de LAADS (descarga bloqueante)
 requests>=2.26.0
 
 # Dependencias comunes
