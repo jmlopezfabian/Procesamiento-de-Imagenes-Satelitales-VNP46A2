@@ -177,16 +177,39 @@ async def test_html_con_200_transitorio_se_recupera(sesion, tmp_path, esperas):
     assert srv.visitas["/g.h5"] == 2
 
 
-async def test_html_con_200_en_el_ultimo_intento_lanza_credenciales(sesion, tmp_path, esperas):
+async def test_un_unico_html_en_el_ultimo_intento_es_descarga_fallida(sesion, tmp_path, esperas):
+    """Con un solo intento, un HTML aislado no prueba que el token sea malo."""
     async def h(request):
         return web.Response(text="<html>Login</html>", content_type="text/html")
 
     async with Servidor() as srv:
         srv.ruta("/g.h5", h)
-        with pytest.raises(CredencialesInvalidas):
-            await download_file_async(sesion, f"{srv.base}/g.h5", str(tmp_path / "g.h5"),
+        with pytest.raises(DescargaFallida):
+            await bajar_archivo_async(sesion, f"{srv.base}/g.h5", str(tmp_path / "g.h5"),
                                       max_retries=1)
-    assert srv.visitas["/g.h5"] == 1
+        # La variante pública lo traduce a None, no a CredencialesInvalidas.
+        assert await download_file_async(sesion, f"{srv.base}/g.h5", str(tmp_path / "g.h5"),
+                                         max_retries=1) is None
+    assert srv.visitas["/g.h5"] == 2
+
+
+async def test_html_en_el_ultimo_intento_tras_un_fallo_distinto_es_descarga_fallida(
+        sesion, tmp_path, esperas, monkeypatch):
+    """503 y luego HTML: la racha de HTML es de 1, así que no son credenciales."""
+    monkeypatch.setattr(config, "BACKOFF_TOPE", 0.02)
+    secuencia = iter([503, "html"])
+
+    async def h(request):
+        paso = next(secuencia)
+        if paso == "html":
+            return web.Response(text="<html>x</html>", content_type="text/html")
+        return web.Response(status=paso)
+
+    async with Servidor() as srv:
+        srv.ruta("/g.h5", h)
+        with pytest.raises(DescargaFallida):
+            await bajar_archivo_async(sesion, f"{srv.base}/g.h5", str(tmp_path / "g.h5"),
+                                      max_retries=2)
 
 
 async def test_html_no_consecutivo_no_cuenta_como_credenciales(
@@ -653,6 +676,56 @@ async def test_cuadrante_ausente_y_dia_sin_publicar_son_none_sin_fallo(sesion, a
         api(srv)
         assert await buscar_archivo_async(sesion, 2024, "001", "h99v99") is None
         assert await buscar_archivo_async(sesion, 2024, "002", "h08v07") is None
+
+
+# --- Listado con 200 y forma que no es de listado ----------------------------------------
+
+@pytest.mark.parametrize("cuerpo", [b"", b"null", b'{"detail": "mantenimiento"}',
+                                    b'{"content": null}', b'"texto"', b"42"],
+                         ids=["vacio", "null", "dict_sin_content", "content_null",
+                              "string", "numero"])
+async def test_listado_sin_forma_de_listado_es_transitorio(sesion, api, esperas, cuerpo):
+    estado = {"n": 0}
+
+    async def h(request):
+        estado["n"] += 1
+        if estado["n"] == 1:
+            return web.Response(body=cuerpo, content_type="application/json")
+        return web.json_response(LISTADO)
+
+    async with Servidor() as srv:
+        srv.ruta(RUTA_LISTADO, h)
+        api(srv)
+        url = await buscar_archivo_async(sesion, 2024, "001", "h08v07")
+    assert url is not None and srv.visitas[RUTA_LISTADO] == 2
+
+
+@pytest.mark.parametrize("cuerpo", [b"", b"null", b'{"detail": "x"}'])
+async def test_listado_sin_forma_persistente_es_descarga_fallida(
+        sesion, api, esperas, monkeypatch, cuerpo):
+    async def h(request):
+        return web.Response(body=cuerpo, content_type="application/json")
+
+    monkeypatch.setattr(config, "MAX_INTENTOS", 3)
+    async with Servidor() as srv:
+        srv.ruta(RUTA_LISTADO, h)
+        api(srv)
+        with pytest.raises(DescargaFallida):
+            await buscar_archivo_async(sesion, 2024, "001", "h08v07")
+        assert await find_file_async(sesion, 2024, "001", "h08v07") is None
+    assert srv.visitas[RUTA_LISTADO] == 6
+
+
+@pytest.mark.parametrize("cuerpo", ['{"content": []}', "[]"])
+async def test_listado_vacio_valido_sigue_siendo_dia_sin_publicar(sesion, api, esperas, cuerpo):
+    async def h(request):
+        return web.Response(text=cuerpo, content_type="application/json")
+
+    async with Servidor() as srv:
+        srv.ruta(RUTA_LISTADO, h)
+        api(srv)
+        assert await buscar_archivo_async(sesion, 2024, "001", "h08v07") is None
+    assert srv.visitas[RUTA_LISTADO] == 1, "un día sin publicar no se reintenta"
 
 
 # --- Listado con 200 y cuerpo ilegible --------------------------------------------------

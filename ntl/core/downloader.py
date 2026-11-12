@@ -107,6 +107,19 @@ class _Entrada(NamedTuple):
 _SIN_LISTADO: dict = {}
 
 
+def _tiene_forma_de_listado(datos) -> bool:
+    """
+    ¿Tiene el JSON la forma de un listado (aunque esté vacío)?
+
+    Vale `{"content": [...]}` o una lista en la raíz. Un `null`, un dict sin
+    `content` (p. ej. `{"detail": "..."}` de un proxy o de un error con 200) o
+    cualquier otro tipo no es «día sin publicar»: es una respuesta rota.
+    """
+    if isinstance(datos, dict):
+        return isinstance(datos.get("content"), list)
+    return isinstance(datos, list)
+
+
 def _entradas_del_listado(datos) -> dict:
     """
     nombre -> (downloadsLink, size, mtime) de los .h5 de un listado JSON de LAADS.
@@ -182,10 +195,14 @@ def find_file(year, day, cuadrante, producto=None):
         return None
 
     try:
-        entradas = _entradas_del_listado(response.json())
+        datos = response.json()
     except ValueError:
         print(f"El listado de {url} no es JSON")
         return None
+    if not _tiene_forma_de_listado(datos):
+        print(f"El listado de {url} no tiene la forma esperada")
+        return None
+    entradas = _entradas_del_listado(datos)
     entrada = _elegir_entrada(entradas, cuadrante, producto)
     if entrada:
         return entrada.url
@@ -362,9 +379,11 @@ async def _con_reintentos(intento, descripcion, max_intentos, base, pesada=False
     a None, los lotes la anotan). `CredencialesInvalidas` y todo lo que no sea
     red (ENOSPC, bugs) se propagan: reintentarlos escondería el problema.
 
-    Un 200 con HTML (`_RespuestaHTML`) se reintenta una vez como transitorio; si
-    se repite en dos intentos seguidos, o es el último intento, se da por token
-    inválido.
+    Un 200 con HTML (`_RespuestaHTML`) se reintenta como transitorio; solo dos
+    seguidos se dan por token inválido. Un único HTML en el último intento (p. ej.
+    NTL_MAX_INTENTOS=1) no basta: puede ser una página de mantenimiento, y abortar
+    toda la corrida por credenciales sería un falso positivo; es un fallo
+    transitorio agotado (`DescargaFallida`).
     """
     limitador = obtener_limitador()
     tope = config.BACKOFF_TOPE
@@ -386,7 +405,7 @@ async def _con_reintentos(intento, descripcion, max_intentos, base, pesada=False
             return None
         except _RespuestaHTML as e:
             html_seguidos += 1
-            if html_seguidos >= 2 or n == max_intentos:
+            if html_seguidos >= 2:
                 raise CredencialesInvalidas(e.mensaje_credenciales) from None
             motivo, pedida, penalizar = e.motivo, e.espera, e.penalizar
         except _Reintentar as e:
@@ -531,11 +550,17 @@ async def _pedir_listado(session, url, max_intentos, base):
         try:
             async with _get(session, url) as resp:
                 _evaluar_status(resp, url)
-                return await _leer_json(resp, url)
+                datos = await _leer_json(resp, url)
         except _Definitivo as e:
             # 404 y compañía: el mismo pedido dará lo mismo, y se recuerda (con TTL).
             print(f"Listado {url}: {e}; no se reintenta")
             return _SIN_LISTADO
+        # Fuera del `try` del `_get`: la respuesta ya se leyó entera. Sin forma de
+        # listado se reintenta; si no, un cuerpo vacío/`null`/error con 200 se
+        # confundiría con un día sin publicar y no se volvería a intentar.
+        if not _tiene_forma_de_listado(datos):
+            raise _Reintentar("el listado no tiene la forma esperada (sin «content»)")
+        return datos
 
     # Agotar reintentos lanza DescargaFallida: no es un listado vacío.
     datos = await _con_reintentos(intento, f"Listado {url}", max_intentos, base)

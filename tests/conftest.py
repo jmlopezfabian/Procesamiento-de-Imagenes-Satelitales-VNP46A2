@@ -129,13 +129,17 @@ def mock_hdf5_file():
 
 
 @pytest.fixture(autouse=True)
-def red_sin_esperas(monkeypatch):
+def red_sin_esperas(monkeypatch, entorno_ntl_limpio):
     """
     Descargas sin esperas reales y con un limitador nuevo en cada prueba.
 
     Los reintentos duermen segundos de verdad y el bucket de peticiones va a
     2/s: con ellos cada prueba de red tardaría lo que tarda NASA. `esperas`
     recoge lo que el código habría dormido para poder comprobarlo.
+
+    Depende de `entorno_ntl_limpio` a propósito: éste fija las constantes de
+    config a sus valores por omisión y, si corriera después, devolvería el
+    bucket a 2/s pisando el 10 000 de aquí.
     """
     import ntl.core.config as config
     import ntl.core.downloader as downloader
@@ -172,3 +176,20 @@ def entorno_ntl_limpio(monkeypatch):
     import os
     for nombre in [n for n in os.environ if n.startswith(("NTL_", "VNP46A1_"))]:
         monkeypatch.delenv(nombre, raising=False)
+    # config lee NTL_* al importar: quitarlas del entorno no basta si ya estaban
+    # exportadas cuando se importó (NTL_MAX_INTENTOS=2, NTL_TTL_LISTADO_404=0,
+    # NTL_MAX_DESCARGAS=1... rompían pruebas que asumen los valores por omisión).
+    # Se fijan a los documentados en config.py; las pruebas que necesitan otro
+    # valor lo ajustan después con su propio monkeypatch.
+    import ntl.core.config as config
+    for nombre, valor in {
+        "PRODUCTO": "VJ146A2",
+        "MAX_FECHAS_CONCURRENTES": 4,
+        "MAX_DESCARGAS": 4,
+        "MAX_PETICIONES_POR_SEG": 2.0,
+        "MAX_INTENTOS": 5,
+        "BACKOFF_BASE": 2.0,
+        "BACKOFF_TOPE": 120.0,
+        "TTL_LISTADO_404": 600.0,
+    }.items():
+        monkeypatch.setattr(config, nombre, valor)

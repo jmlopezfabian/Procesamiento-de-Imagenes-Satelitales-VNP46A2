@@ -125,3 +125,11 @@ def test_config_acepta_cero_y_rechaza_negativos_al_importar():
     mal = _importar_config(NTL_MAX_PETICIONES_POR_SEG="-3")
     assert mal.returncode != 0
     assert "NTL_MAX_PETICIONES_POR_SEG" in mal.stderr
+
+
+@pytest.mark.parametrize("valor", ["nan", "inf", "-inf"])
+def test_config_rechaza_nan_e_infinito_al_importar(valor):
+    """`nan < 0` es False: el nan pasaba la validación y envenenaba el bucket."""
+    mal = _importar_config(NTL_MAX_PETICIONES_POR_SEG=valor)
+    assert mal.returncode != 0
+    assert "NTL_MAX_PETICIONES_POR_SEG" in mal.stderr
