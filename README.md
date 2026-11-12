@@ -375,7 +375,7 @@ incluidos; si NASA pide esperar (`Retry-After`), se pausa a todas las tareas.
 |---|---|---|
 | `NTL_MAX_DESCARGAS` | 4 | Gránulos bajándose a la vez, sumando todas las instancias del proceso |
 | `NTL_MAX_PETICIONES_POR_SEG` | 2 | Ritmo máximo de peticiones a LAADS. `0` = sin límite de ritmo; un negativo falla al importar |
-| `NTL_MAX_INTENTOS` | 5 | Intentos por petición ante errores transitorios |
+| `NTL_MAX_INTENTOS` | 5 | Intentos por petición ante errores transitorios. Un token inválido se reconoce por dos páginas HTML seguidas en la misma petición; con `1` nunca hay dos, así que se reporta como `DescargaFallida` en cada fecha en vez de abortar la corrida |
 | `NTL_BACKOFF_BASE` | 2 (s) | Base de la espera exponencial con jitter |
 | `NTL_BACKOFF_TOPE` | 120 (s) | Tope de cualquier espera, incluido un `Retry-After` |
 | `NTL_TTL_LISTADO_404` | 600 (s) | Cuánto se recuerda un 404 del listado de un día (un día aún no publicado también da 404). `0` = no recordarlo |
