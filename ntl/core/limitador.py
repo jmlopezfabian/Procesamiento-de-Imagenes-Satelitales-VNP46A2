@@ -13,20 +13,26 @@ excede. Tres mecanismos, compartidos por todo el proceso:
 
 Se crea uno por event loop y de forma perezosa: los primitivos de asyncio se
 atan al loop donde se usan por primera vez, y `asyncio.run` puede llamarse
-varias veces en un mismo proceso (cada llamada es un loop nuevo).
+varias veces en un mismo proceso (cada llamada es un loop nuevo). El estado
+cuelga del propio loop (ver por_loop) para que no lo retenga tras cerrarse.
+
+`peticiones_por_seg <= 0` significa sin límite de ritmo (el semáforo de descargas
+y las pausas por 429/503 siguen vigentes).
 """
 import asyncio
 import time
-import weakref
 
 from . import config
+from .por_loop import estado_del_loop, olvidar_estado
 
 
 class Limitador:
     def __init__(self, max_descargas: int, peticiones_por_seg: float, reloj=time.monotonic):
         self._descargas = asyncio.Semaphore(max_descargas)
         self.max_descargas = max_descargas
-        self._tasa = float(peticiones_por_seg)
+        # <= 0: sin bucket. Dividir entre la tasa para saber cuánto esperar
+        # daba ZeroDivisionError con NTL_MAX_PETICIONES_POR_SEG=0.
+        self._tasa = max(0.0, float(peticiones_por_seg))
         # Ráfaga de a lo sumo un segundo de peticiones, y nunca menos de una.
         self._capacidad = max(1.0, self._tasa)
         self._fichas = self._capacidad
@@ -49,6 +55,8 @@ class Limitador:
                 if ahora < self._pausa_hasta:
                     await asyncio.sleep(self._pausa_hasta - ahora)
                     continue
+                if self._tasa <= 0:
+                    return
                 self._fichas = min(self._capacidad,
                                    self._fichas + (ahora - self._ultimo) * self._tasa)
                 self._ultimo = ahora
@@ -66,19 +74,16 @@ class Limitador:
         self._ultimo = self._pausa_hasta
 
 
-_limitadores: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_CLAVE = "limitador"
 
 
 def obtener_limitador() -> Limitador:
     """El limitador del event loop en curso; lo crea la primera vez."""
-    loop = asyncio.get_running_loop()
-    limitador = _limitadores.get(loop)
-    if limitador is None:
-        limitador = Limitador(config.MAX_DESCARGAS, config.MAX_PETICIONES_POR_SEG)
-        _limitadores[loop] = limitador
-    return limitador
+    return estado_del_loop(
+        _CLAVE,
+        lambda: Limitador(config.MAX_DESCARGAS, config.MAX_PETICIONES_POR_SEG))
 
 
 def reiniciar_limitador():
     """Descarta los limitadores existentes (pensado para pruebas que cambian la config)."""
-    _limitadores.clear()
+    olvidar_estado(_CLAVE)

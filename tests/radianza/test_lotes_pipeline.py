@@ -43,7 +43,7 @@ def _sat(coberturas):
         return SatelliteImagesAsync(list(coberturas))
 
 
-def _medicion(rutas, piezas, fecha, municipio, delete_files=True):
+def _medicion(rutas, piezas, fecha, municipio, delete_files=True, producto=None):
     return SimpleNamespace(model_dump=lambda: {"Fecha": fecha, "Municipio": municipio})
 
 
@@ -77,8 +77,8 @@ def entorno(tmp_path, monkeypatch):
         Path(path).write_bytes(H5)
         return path
 
-    monkeypatch.setattr(lotes, "find_file_async", find)
-    monkeypatch.setattr(lotes, "download_file_async", descarga)
+    monkeypatch.setattr(lotes, "buscar_archivo_async", find)
+    monkeypatch.setattr(lotes, "bajar_archivo_async", descarga)
     return e
 
 
@@ -110,16 +110,69 @@ async def test_progreso_cuenta_fechas_unicas(entorno):
     assert avisos == ["1/2 fechas", "2/2 fechas"]
 
 
-async def test_error_de_red_en_una_fecha_no_tumba_el_lote(entorno):
-    entorno.listado_falla = {"003"}
-    sat = _sat({"a": _Cobertura(["h08v07"]), "b": _Cobertura(["h08v07", "h09v07"])})
-    fechas = [f"{d:02d}-01-24" for d in range(1, 7)]
-    df = await sat.run(fechas, save_progress_enabled=False, max_concurrentes=3)
+async def test_reintentos_agotados_quedan_en_fallos_y_no_como_sin_datos(
+        entorno, monkeypatch):
+    """
+    Con las funciones reales y un servidor que contesta 503 sin parar: agotar los
+    reintentos de un listado o de una descarga es un fallo (`DescargaFallida`),
+    no una fecha sin datos. Un 404 de archivo, un cuadrante fuera del listado y
+    un día sin publicar siguen siendo huecos normales, sin fallo.
+    """
+    visitas = Counter()
 
-    assert sorted(df["Fecha"].astype(str).unique()) == [
-        f"2024-01-{d:02d}" for d in (1, 2, 4, 5, 6)]
-    assert {f["fecha"] for f in sat.fallos} == {"2024-01-03"}
-    assert {f["tipo"] for f in sat.fallos} == {"ClientConnectionError"}
+    async def listado(request):
+        dia = request.match_info["d"]
+        visitas[("listado", dia)] += 1
+        if dia == "003":
+            return web.Response(status=503)          # listado caído
+        if dia == "005":
+            return web.Response(status=404)          # día sin publicar (404)
+        if dia == "006":
+            return web.json_response({"content": []})  # día sin publicar (vacío)
+        base = f"http://127.0.0.1:{servidor.port}/l/{dia}"
+        cuadrantes = ["h08v07"] if dia == "004" else ["h08v07", "h09v07"]
+        return web.json_response({"content": [
+            {"name": f"VJ146A2.A2024{dia}.{c}.002.1.h5", "downloadsLink": f"{base}/{c}.h5",
+             "size": len(H5), "mtime": 1, "resourceType": "File"} for c in cuadrantes]})
+
+    async def granulo(request):
+        dia, nombre = request.match_info["d"], request.match_info["f"]
+        visitas[("granulo", dia, nombre)] += 1
+        if dia == "002":
+            return web.Response(status=503)          # descarga caída
+        if dia == "007":
+            return web.Response(status=404)          # el archivo listado no existe
+        return web.Response(body=H5)
+
+    app = web.Application()
+    app.router.add_get("/api/5200/VJ146A2/{y}/{d}/", listado)
+    app.router.add_get("/l/{d}/{f}", granulo)
+    servidor = TestServer(app)
+    await servidor.start_server()
+    try:
+        monkeypatch.setattr(config, "LAADS_API_BASE", f"http://127.0.0.1:{servidor.port}/api")
+        monkeypatch.setattr(config, "MAX_INTENTOS", 2)
+        monkeypatch.setattr(config, "BACKOFF_TOPE", 0.02)  # el 503 pausa con reloj real
+        monkeypatch.setattr(lotes, "buscar_archivo_async", downloader.buscar_archivo_async)
+        monkeypatch.setattr(lotes, "bajar_archivo_async", downloader.bajar_archivo_async)
+        sat = _sat({"a": _Cobertura(["h08v07"]), "b": _Cobertura(["h08v07", "h09v07"])})
+        fechas = [f"{d:02d}-01-24" for d in range(1, 8)]
+        df = await sat.run(fechas, save_progress_enabled=False, max_concurrentes=3)
+    finally:
+        await servidor.close()
+
+    # Los huecos de 002 y 003 no producen fila (la `_medicion` falsa mide todo lo
+    # que llega); los de 004-007 son «sin datos» normales y no deben ser fallos.
+    fechas_con_fila = set(df["Fecha"].astype(str))
+    assert not fechas_con_fila & {"2024-01-02", "2024-01-03"}
+    por_fecha = {}
+    for f in sat.fallos:
+        por_fecha.setdefault(f["fecha"], []).append(f)
+    # Solo 002 (descarga 503) y 003 (listado 503): ni 005/006 (sin publicar) ni 007 (404).
+    assert sorted(por_fecha) == ["2024-01-02", "2024-01-03"]
+    assert {f["tipo"] for f in sat.fallos} == {"DescargaFallida"}
+    assert "se agotaron los 2 intentos" in por_fecha["2024-01-03"][0]["mensaje"]
+    assert "HTTP 503" in por_fecha["2024-01-02"][0]["mensaje"]
     assert {f["municipio"] for f in sat.fallos} == {"a", "b"}
     # Nada quedó huérfano.
     pendientes = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
@@ -130,7 +183,7 @@ async def test_credenciales_invalidas_abortan_el_lote(entorno, monkeypatch):
     async def descarga(session, url, path):
         raise CredencialesInvalidas("token malo")
 
-    monkeypatch.setattr(lotes, "download_file_async", descarga)
+    monkeypatch.setattr(lotes, "bajar_archivo_async", descarga)
     sat = _sat({"a": _Cobertura(["h08v07"])})
     with pytest.raises(CredencialesInvalidas):
         await sat.run([f"{d:02d}-01-24" for d in range(1, 9)], save_progress_enabled=False)
@@ -227,7 +280,7 @@ async def test_pool_sin_barreras_por_chunks(entorno):
         Path(path).write_bytes(H5)
         return path
 
-    with patch.object(lotes, "download_file_async", descarga):
+    with patch.object(lotes, "bajar_archivo_async", descarga):
         sat = _sat({"a": _Cobertura(["h08v07"])})
         await sat.run([f"{d:02d}-01-24" for d in range(1, 9)], chunks=2,
                       save_progress_enabled=False, max_concurrentes=2)
@@ -241,15 +294,15 @@ async def test_checkpoint_unico_y_atomico_cada_k_fechas(entorno):
     visto = []
     original = lotes.save_progress
 
-    def espia(df, nombre, chunk_number=None):
+    def espia(df, nombre, chunk_number=None, producto=None):
         visto.append(len(df))
-        return original(df, nombre, chunk_number)
+        return original(df, nombre, chunk_number, producto)
 
     with patch.object(lotes, "save_progress", espia):
         df = await sat.run([f"{d:02d}-01-24" for d in range(1, 7)], chunks=2,
                            max_concurrentes=1)
 
-    assert [p.name for p in entorno.datos.iterdir()] == ["multi_municipio_progress.parquet"]
+    assert [p.name for p in entorno.datos.iterdir()] == ["multi_municipio_VJ146A2_progress.parquet"]
     assert visto == [4, 8]  # 2 y 4 fechas completadas (la última no re-guarda lo que se devuelve)
     assert len(df) == 12
 
@@ -269,8 +322,8 @@ async def test_error_guarda_un_solo_archivo_de_progreso(entorno):
         with pytest.raises(RuntimeError):
             await sat.run([f"{d:02d}-01-24" for d in range(1, 6)], chunks=10,
                           max_concurrentes=1)
-    assert [p.name for p in entorno.datos.iterdir()] == ["multi_municipio_progress.parquet"]
-    assert len(pd.read_parquet(entorno.datos / "multi_municipio_progress.parquet")) == 2
+    assert [p.name for p in entorno.datos.iterdir()] == ["multi_municipio_VJ146A2_progress.parquet"]
+    assert len(pd.read_parquet(entorno.datos / "multi_municipio_VJ146A2_progress.parquet")) == 2
 
 
 async def test_resultados_en_el_orden_de_entrada(entorno):
@@ -281,7 +334,7 @@ async def test_resultados_en_el_orden_de_entrada(entorno):
         Path(path).write_bytes(H5)
         return path
 
-    with patch.object(lotes, "download_file_async", descarga):
+    with patch.object(lotes, "bajar_archivo_async", descarga):
         sat = _sat({"a": _Cobertura(["h08v07"])})
         df = await sat.run(["01-01-24", "02-01-24", "03-01-24"], save_progress_enabled=False,
                            max_concurrentes=3)
@@ -291,7 +344,7 @@ async def test_resultados_en_el_orden_de_entrada(entorno):
 async def test_el_contador_borra_cada_granulo_al_terminar_el_ultimo_municipio(entorno):
     existentes = []
 
-    def proc(rutas, piezas, fecha, municipio, delete_files=True):
+    def proc(rutas, piezas, fecha, municipio, delete_files=True, producto=None):
         existentes.append(all(Path(r).exists() for r in rutas.values() if r))
         return None
 
@@ -346,8 +399,8 @@ async def test_concurrencia_hacia_nasa_acotada_con_varias_instancias(entorno, mo
         monkeypatch.setattr(config, "MAX_DESCARGAS", 2)
         reiniciar_limitador()
         # Se restauran las funciones reales: la fixture `entorno` las había sustituido.
-        monkeypatch.setattr(lotes, "find_file_async", downloader.find_file_async)
-        monkeypatch.setattr(lotes, "download_file_async", downloader.download_file_async)
+        monkeypatch.setattr(lotes, "buscar_archivo_async", downloader.buscar_archivo_async)
+        monkeypatch.setattr(lotes, "bajar_archivo_async", downloader.bajar_archivo_async)
 
         sats = [_sat({f"m{i}": _Cobertura(["h08v07", "h09v07"])}) for i in range(3)]
         fechas = [f"{d:02d}-01-24" for d in range(1, 7)]
@@ -378,8 +431,8 @@ async def test_el_producto_se_propaga_a_busqueda_y_a_los_nombres_temporales(ento
         Path(path).write_bytes(H5)
         return path
 
-    monkeypatch.setattr(lotes, "find_file_async", find)
-    monkeypatch.setattr(lotes, "download_file_async", descarga)
+    monkeypatch.setattr(lotes, "buscar_archivo_async", find)
+    monkeypatch.setattr(lotes, "bajar_archivo_async", descarga)
     with patch.object(lotes, "load_coord_data", side_effect=lambda m, _: _Cobertura(["h08v07"])):
         sat = SatelliteImagesAsync(["a"], producto="VNP46A2")
     await sat.run(["05-01-24"], save_progress_enabled=False)
@@ -413,3 +466,64 @@ async def test_fuera_de_vigencia_en_modo_estricto_lanza(entorno):
     with pytest.raises(ValueError, match="no tiene datos después de 2026-11-02"):
         await sat.run(["03-11-26"], save_progress_enabled=False, estricto=True)
     assert entorno.busquedas == []
+
+
+# --- Defensas y nombres por producto -----------------------------------------------
+
+async def test_el_producto_pedido_se_pasa_a_la_extraccion(entorno, monkeypatch):
+    recibidos = []
+
+    def medicion(rutas, piezas, fecha, municipio, delete_files=True, producto=None):
+        recibidos.append(producto)
+        return _medicion(rutas, piezas, fecha, municipio)
+
+    monkeypatch.setattr(lotes, "process_image_mosaico", medicion)
+    await _sat({"a": _Cobertura(["h08v07"])}).run(["05-01-24"], save_progress_enabled=False)
+    assert recibidos == ["VJ146A2"]
+
+
+async def test_producto_distinto_al_del_archivo_queda_en_fallos(entorno, monkeypatch):
+    from ntl.core.errores import MedicionImposible
+
+    def medicion(rutas, piezas, fecha, municipio, delete_files=True, producto=None):
+        raise MedicionImposible(f"se pidió {producto} pero el archivo es VNP46A2",
+                                municipio, fecha)
+
+    monkeypatch.setattr(lotes, "process_image_mosaico", medicion)
+    sat = _sat({"a": _Cobertura(["h08v07"])})
+    df = await sat.run(["05-01-24"], save_progress_enabled=False)
+    assert df.empty
+    assert [f["tipo"] for f in sat.fallos] == ["MedicionImposible"]
+
+
+async def test_checkpoints_de_productos_distintos_no_se_pisan(entorno):
+    with patch.object(lotes, "load_coord_data", side_effect=lambda m, _: _Cobertura(["h08v07"])):
+        vj = SatelliteImagesAsync(["a"], "VJ146A2")
+        vnp = SatelliteImagesAsync(["a"], "VNP46A2")
+    await vj.run(["05-01-24", "06-01-24"], chunks=1, save_progress_enabled=True)
+    await vnp.run(["05-01-23", "06-01-23"], chunks=1, save_progress_enabled=True)
+    nombres = sorted(p.name for p in entorno.datos.iterdir())
+    assert nombres == ["multi_municipio_VJ146A2_progress.parquet",
+                       "multi_municipio_VNP46A2_progress.parquet"]
+
+
+async def test_fallos_se_reinicia_en_cada_run_y_su_archivo_lleva_el_producto(entorno):
+    sat = _sat({"a": _Cobertura(["h08v07"])})
+    sat.fallos.append({"municipio": "viejo", "fecha": "2020-01-01", "cuadrantes": [],
+                       "tipo": "KeyError", "mensaje": "de una corrida anterior"})
+    entorno.fallan = set()
+    entorno.listado_falla = {"005"}
+    from ntl.core.errores import DescargaFallida
+
+    async def find(session, year, day, cuadrante, producto=None):
+        if day in entorno.listado_falla:
+            raise DescargaFallida("listado caído")
+        return f"http://x/{day}/{cuadrante}.h5"
+
+    with patch.object(lotes, "buscar_archivo_async", find):
+        await sat.run(["05-01-24"], save_progress_enabled=True)
+        assert [f["municipio"] for f in sat.fallos] == ["a"], "el fallo viejo no debe arrastrarse"
+        assert (entorno.datos / "fallos_VJ146A2.parquet").exists()
+        assert not (entorno.datos / "fallos.parquet").exists()
+        await sat.run(["06-01-24"], save_progress_enabled=False)
+    assert sat.fallos == []

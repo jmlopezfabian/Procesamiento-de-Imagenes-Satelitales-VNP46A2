@@ -157,3 +157,18 @@ def red_sin_esperas(monkeypatch):
 def esperas(red_sin_esperas):
     """Lista de esperas (s) que los reintentos pidieron dormir."""
     return red_sin_esperas
+
+
+@pytest.fixture(autouse=True)
+def entorno_ntl_limpio(monkeypatch):
+    """
+    Pruebas independientes del entorno de quien las corre.
+
+    `NTL_PRODUCTO` se lee al llamar (no al importar) y cambia el producto por
+    omisión: con `NTL_PRODUCTO=VNP46A2` exportada (o en un .env, que config
+    carga) fallaban 15 pruebas que esperan el VJ146A2 por omisión. Las pruebas
+    que necesitan un valor lo fijan ellas con `monkeypatch.setenv`.
+    """
+    import os
+    for nombre in [n for n in os.environ if n.startswith(("NTL_", "VNP46A1_"))]:
+        monkeypatch.delenv(nombre, raising=False)

@@ -131,7 +131,7 @@ class TestDescargaDeVariosCuadrantes:
 
         existentes_al_procesar = []
 
-        def procesar(rutas, piezas, date_obj, municipio, delete_files=True):
+        def procesar(rutas, piezas, date_obj, municipio, delete_files=True, producto=None):
             existentes_al_procesar.append(
                 {c: os.path.exists(r) for c, r in rutas.items()}
             )
@@ -140,9 +140,9 @@ class TestDescargaDeVariosCuadrantes:
         with patch("ntl.radianza.lotes.TEMP_DIR", tmp_path), \
              patch("ntl.core.config.TEMP_DIR", tmp_path), \
              patch("ntl.radianza.lotes.temp_path", side_effect=lambda n: tmp_path / n), \
-             patch("ntl.radianza.lotes.find_file_async",
+             patch("ntl.radianza.lotes.buscar_archivo_async",
                    new_callable=AsyncMock, side_effect=lambda s, y, d, c, p=None: f"http://x/{c}.h5"), \
-             patch("ntl.radianza.lotes.download_file_async", side_effect=descarga), \
+             patch("ntl.radianza.lotes.bajar_archivo_async", side_effect=descarga), \
              patch("ntl.radianza.lotes.process_image_mosaico", side_effect=procesar):
             await sat.get_measures_for_date(None, "01-01-24")
 
@@ -244,9 +244,9 @@ class TestLimiteDeFechasConcurrentes:
         with patch("ntl.radianza.lotes.TEMP_DIR", tmp_path), \
              patch("ntl.core.config.TEMP_DIR", tmp_path), \
              patch("ntl.radianza.lotes.temp_path", side_effect=lambda n: tmp_path / n), \
-             patch("ntl.radianza.lotes.find_file_async",
+             patch("ntl.radianza.lotes.buscar_archivo_async",
                    new_callable=AsyncMock, side_effect=lambda s, y, d, c, p=None: f"http://x/{c}.h5"), \
-             patch("ntl.radianza.lotes.download_file_async", side_effect=descarga), \
+             patch("ntl.radianza.lotes.bajar_archivo_async", side_effect=descarga), \
              patch("ntl.radianza.lotes.process_image_mosaico", return_value=None), \
              patch("ntl.radianza.lotes.cleanup_temp_files"):
             await sat.run(fechas, save_progress_enabled=False, max_concurrentes=2)
@@ -348,7 +348,7 @@ class TestUnFalloNoDesapareceEnSilencio:
              patch("ntl.radianza.lotes.process_image_mosaico", side_effect=procesar):
             return await sat.get_measures_for_date(None, "01-01-24", **kw)
 
-    def _procesar(self, rutas, piezas, date_obj, municipio, delete_files=True):
+    def _procesar(self, rutas, piezas, date_obj, municipio, delete_files=True, producto=None):
         if municipio == "malo":
             raise KeyError("DNB_BRDF-Corrected_NTL")
         return MagicMock(model_dump=lambda: {"Municipio": municipio})
@@ -403,9 +403,9 @@ class TestUnFalloNoDesapareceEnSilencio:
         with patch("ntl.radianza.lotes.TEMP_DIR", tmp_path), \
              patch("ntl.core.config.TEMP_DIR", tmp_path), \
              patch("ntl.radianza.lotes.temp_path", side_effect=lambda n: tmp_path / n), \
-             patch("ntl.radianza.lotes.find_file_async",
+             patch("ntl.radianza.lotes.buscar_archivo_async",
                    new_callable=AsyncMock, side_effect=lambda s, y, d, c, p=None: f"http://x/{c}.h5"), \
-             patch("ntl.radianza.lotes.download_file_async", side_effect=descarga), \
+             patch("ntl.radianza.lotes.bajar_archivo_async", side_effect=descarga), \
              patch("ntl.radianza.lotes.process_image_mosaico",
                    side_effect=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))):
             await sat.get_measures_for_date(None, "01-01-24")
@@ -463,7 +463,7 @@ class TestUnFalloNoDesapareceEnSilencio:
              patch.object(sat, "get_measures_for_date", side_effect=medir):
             await sat.run(["01-01-24"], save_progress_enabled=True)
 
-        guardado = pd.read_parquet(tmp_path / "fallos.parquet")
+        guardado = pd.read_parquet(tmp_path / "fallos_VJ146A2.parquet")
         assert len(guardado) == 1
         assert guardado.iloc[0]["municipio"] == "iztapalapa"
         assert guardado.iloc[0]["tipo"] == "KeyError"

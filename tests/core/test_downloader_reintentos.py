@@ -16,7 +16,8 @@ import ntl.core.config as config
 import ntl.core.downloader as downloader
 from ntl import CredencialesInvalidas as CredencialesExportada
 from ntl.core.downloader import download_file_async, find_file_async
-from ntl.core.errores import CredencialesInvalidas
+from ntl.core.errores import CredencialesInvalidas, DescargaFallida
+from ntl.core.downloader import bajar_archivo_async, buscar_archivo_async
 from ntl.core.limitador import obtener_limitador
 
 H5 = b"\x89HDF\r\n\x1a\n" + b"\0" * 5000
@@ -144,7 +145,9 @@ async def test_401_403_lanzan_credenciales_sin_reintentar(sesion, tmp_path, espe
     assert esperas == []
 
 
-async def test_html_con_200_lanza_credenciales_sin_reintentar(sesion, tmp_path, esperas):
+async def test_html_con_200_persistente_lanza_credenciales_al_segundo_intento(
+        sesion, tmp_path, esperas):
+    """Un HTML con 200 puede ser mantenimiento: se reintenta una vez; dos seguidos, token malo."""
     async def h(request):
         return web.Response(text="<html><body>Login</body></html>", content_type="text/html")
 
@@ -152,9 +155,58 @@ async def test_html_con_200_lanza_credenciales_sin_reintentar(sesion, tmp_path, 
         srv.ruta("/g.h5", h)
         with pytest.raises(CredencialesInvalidas):
             await download_file_async(sesion, f"{srv.base}/g.h5", str(tmp_path / "g.h5"))
-    assert srv.visitas["/g.h5"] == 1
-    assert esperas == []
+    assert srv.visitas["/g.h5"] == 2
+    assert len(esperas) == 1
     assert list(tmp_path.iterdir()) == [], "no debe quedar ni el .part"
+
+
+async def test_html_con_200_transitorio_se_recupera(sesion, tmp_path, esperas):
+    estado = {"n": 0}
+
+    async def h(request):
+        estado["n"] += 1
+        if estado["n"] == 1:
+            return web.Response(text="<!DOCTYPE html><html>Service unavailable</html>",
+                                content_type="text/html")
+        return web.Response(body=H5)
+
+    async with Servidor() as srv:
+        srv.ruta("/g.h5", h)
+        res = await download_file_async(sesion, f"{srv.base}/g.h5", str(tmp_path / "g.h5"))
+    assert res == str(tmp_path / "g.h5")
+    assert srv.visitas["/g.h5"] == 2
+
+
+async def test_html_con_200_en_el_ultimo_intento_lanza_credenciales(sesion, tmp_path, esperas):
+    async def h(request):
+        return web.Response(text="<html>Login</html>", content_type="text/html")
+
+    async with Servidor() as srv:
+        srv.ruta("/g.h5", h)
+        with pytest.raises(CredencialesInvalidas):
+            await download_file_async(sesion, f"{srv.base}/g.h5", str(tmp_path / "g.h5"),
+                                      max_retries=1)
+    assert srv.visitas["/g.h5"] == 1
+
+
+async def test_html_no_consecutivo_no_cuenta_como_credenciales(
+        sesion, tmp_path, esperas, monkeypatch):
+    """HTML, 503, HTML, éxito: los HTML no son seguidos, no hay motivo para abortar."""
+    monkeypatch.setattr(config, "BACKOFF_TOPE", 0.02)
+    secuencia = iter(["html", 503, "html", "ok"])
+
+    async def h(request):
+        paso = next(secuencia)
+        if paso == "html":
+            return web.Response(text="<html>x</html>", content_type="text/html")
+        if paso == "ok":
+            return web.Response(body=H5)
+        return web.Response(status=paso)
+
+    async with Servidor() as srv:
+        srv.ruta("/g.h5", h)
+        res = await download_file_async(sesion, f"{srv.base}/g.h5", str(tmp_path / "g.h5"))
+    assert res is not None
 
 
 @pytest.mark.parametrize("status", [400, 404, 410])
@@ -545,3 +597,216 @@ def test_retry_after_acepta_segundos_y_fecha_http():
     futura = time.time() + 60
     import email.utils
     assert 55 <= downloader._espera_retry_after(email.utils.formatdate(futura, usegmt=True)) <= 61
+
+
+# --- Agotar reintentos no es "no existe" ---------------------------------------------
+
+async def test_agotar_reintentos_de_descarga_lanza_en_la_variante_interna(
+        sesion, tmp_path, esperas, monkeypatch):
+    # Un 503 pausa al limitador de verdad (reloj real): tope corto para no esperar.
+    monkeypatch.setattr(config, "BACKOFF_TOPE", 0.02)
+    async def h(request):
+        return web.Response(status=503)
+
+    async with Servidor() as srv:
+        srv.ruta("/g.h5", h)
+        destino = str(tmp_path / "g.h5")
+        url = f"{srv.base}/g.h5"
+        with pytest.raises(DescargaFallida, match="HTTP 503"):
+            await bajar_archivo_async(sesion, url, destino, max_retries=2)
+        # El contrato público no cambia: None.
+        assert await download_file_async(sesion, url, destino, max_retries=2) is None
+
+
+async def test_no_existe_sigue_siendo_none_en_la_variante_interna(sesion, tmp_path, esperas):
+    async with Servidor() as srv:  # sin rutas: 404
+        assert await bajar_archivo_async(
+            sesion, f"{srv.base}/g.h5", str(tmp_path / "g.h5")) is None
+
+
+async def test_agotar_reintentos_de_listado_lanza_en_la_variante_interna(
+        sesion, api, esperas, monkeypatch):
+    async def h(request):
+        return web.Response(status=503)
+
+    monkeypatch.setattr(config, "MAX_INTENTOS", 2)
+    monkeypatch.setattr(config, "BACKOFF_TOPE", 0.02)
+    async with Servidor() as srv:
+        srv.ruta(RUTA_LISTADO, h)
+        api(srv)
+        with pytest.raises(DescargaFallida):
+            await buscar_archivo_async(sesion, 2024, "001", "h08v07")
+        assert await find_file_async(sesion, 2024, "001", "h08v07") is None
+
+
+async def test_cuadrante_ausente_y_dia_sin_publicar_son_none_sin_fallo(sesion, api, esperas):
+    vacio = {"n": 0}
+
+    async def h(request):
+        if request.path.endswith("/002/"):
+            vacio["n"] += 1
+            return web.json_response({"content": []})
+        return web.json_response(LISTADO)
+
+    async with Servidor() as srv:
+        srv.ruta(RUTA_LISTADO, h)
+        api(srv)
+        assert await buscar_archivo_async(sesion, 2024, "001", "h99v99") is None
+        assert await buscar_archivo_async(sesion, 2024, "002", "h08v07") is None
+
+
+# --- Listado con 200 y cuerpo ilegible --------------------------------------------------
+
+@pytest.mark.parametrize("cuerpo", [
+    b'{"content": [{"name": "VJ146A2.A2024001.h08v07.002.x.h5", "downloadsL',  # truncado
+    b"no soy json",
+    b"\xff\xfe\x00\xd8 basura",  # no decodifica
+])
+async def test_listado_ilegible_con_200_es_transitorio(sesion, api, esperas, monkeypatch, cuerpo):
+    estado = {"n": 0}
+
+    async def h(request):
+        estado["n"] += 1
+        if estado["n"] == 1:
+            return web.Response(body=cuerpo, content_type="application/json")
+        return web.json_response(LISTADO)
+
+    async with Servidor() as srv:
+        srv.ruta(RUTA_LISTADO, h)
+        api(srv)
+        url = await buscar_archivo_async(sesion, 2024, "001", "h08v07")
+    assert url is not None and srv.visitas[RUTA_LISTADO] == 2
+
+
+async def test_listado_ilegible_persistente_es_descarga_fallida(sesion, api, esperas, monkeypatch):
+    async def h(request):
+        return web.Response(body=b'{"content": [', content_type="application/json")
+
+    monkeypatch.setattr(config, "MAX_INTENTOS", 3)
+    async with Servidor() as srv:
+        srv.ruta(RUTA_LISTADO, h)
+        api(srv)
+        with pytest.raises(DescargaFallida):
+            await buscar_archivo_async(sesion, 2024, "001", "h08v07")
+        assert await find_file_async(sesion, 2024, "001", "h08v07") is None
+
+
+async def test_listado_html_persistente_son_credenciales_invalidas(
+        sesion, api, esperas, monkeypatch):
+    async def h(request):
+        return web.Response(text="<html>Login</html>", content_type="text/html")
+
+    async with Servidor() as srv:
+        srv.ruta(RUTA_LISTADO, h)
+        api(srv)
+        with pytest.raises(CredencialesInvalidas):
+            await find_file_async(sesion, 2024, "001", "h08v07")
+    assert srv.visitas[RUTA_LISTADO] == 2
+
+
+async def test_listado_html_transitorio_se_recupera(sesion, api, esperas):
+    estado = {"n": 0}
+
+    async def h(request):
+        estado["n"] += 1
+        if estado["n"] == 1:
+            return web.Response(text="<!doctype html><html>mantenimiento</html>",
+                                content_type="text/html")
+        return web.json_response(LISTADO)
+
+    async with Servidor() as srv:
+        srv.ruta(RUTA_LISTADO, h)
+        api(srv)
+        assert await find_file_async(sesion, 2024, "001", "h08v07") is not None
+
+
+# --- TTL del 404 del listado -------------------------------------------------------------
+
+async def test_el_404_del_listado_caduca_y_un_dia_publicado_despues_se_encuentra(
+        sesion, api, esperas, monkeypatch):
+    ahora = [1000.0]
+    monkeypatch.setattr(downloader, "_reloj", lambda: ahora[0])
+    monkeypatch.setattr(config, "TTL_LISTADO_404", 600.0)
+    estado = {"n": 0}
+
+    async def h(request):
+        estado["n"] += 1
+        if estado["n"] == 1:
+            return web.Response(status=404)
+        return web.json_response(LISTADO)
+
+    async with Servidor() as srv:
+        srv.ruta(RUTA_LISTADO, h)
+        api(srv)
+        assert await find_file_async(sesion, 2024, "001", "h08v07") is None
+        ahora[0] += 599
+        assert await find_file_async(sesion, 2024, "001", "h07v07") is None
+        assert srv.visitas[RUTA_LISTADO] == 1, "dentro del TTL no se repite la petición"
+        ahora[0] += 2
+        assert await find_file_async(sesion, 2024, "001", "h08v07") is not None
+    assert srv.visitas[RUTA_LISTADO] == 2
+
+
+async def test_con_ttl_cero_el_404_no_se_recuerda(sesion, api, esperas, monkeypatch):
+    monkeypatch.setattr(config, "TTL_LISTADO_404", 0.0)
+
+    async def h(request):
+        return web.Response(status=404)
+
+    async with Servidor() as srv:
+        srv.ruta(RUTA_LISTADO, h)
+        api(srv)
+        await find_file_async(sesion, 2024, "001", "h08v07")
+        await find_file_async(sesion, 2024, "001", "h08v07")
+    assert srv.visitas[RUTA_LISTADO] == 2
+
+
+# --- Penalización y ficha del bucket -----------------------------------------------------
+
+@pytest.mark.parametrize("status,penalizaciones", [(429, 2), (503, 2), (500, 0)])
+async def test_429_y_503_penalizan_tambien_en_el_ultimo_intento(
+        sesion, tmp_path, esperas, monkeypatch, status, penalizaciones):
+    lim = obtener_limitador()
+    llamadas = []
+    monkeypatch.setattr(lim, "penalizar", lambda s: llamadas.append(s))
+
+    async def h(request):
+        return web.Response(status=status)
+
+    async with Servidor() as srv:
+        srv.ruta("/g.h5", h)
+        with pytest.raises(DescargaFallida):
+            await bajar_archivo_async(sesion, f"{srv.base}/g.h5", str(tmp_path / "g.h5"),
+                                      max_retries=2)
+    assert len(llamadas) == penalizaciones
+
+
+async def test_la_ficha_de_una_descarga_se_toma_con_el_slot_en_mano(
+        sesion, api, tmp_path, esperas, monkeypatch):
+    monkeypatch.setattr(config, "MAX_DESCARGAS", 1)
+    from ntl.core.limitador import reiniciar_limitador
+    reiniciar_limitador()
+    lim = obtener_limitador()
+    original = lim.esperar_turno
+    vistas = []
+
+    async def espiar():
+        vistas.append(lim.descarga().locked())
+        await original()
+
+    monkeypatch.setattr(lim, "esperar_turno", espiar)
+
+    async def listado_h(request):
+        return web.json_response(LISTADO)
+
+    async def granulo(request):
+        return web.Response(body=H5)
+
+    async with Servidor() as srv:
+        srv.ruta(RUTA_LISTADO, listado_h)
+        srv.ruta("/g.h5", granulo)
+        api(srv)
+        await find_file_async(sesion, 2024, "001", "h08v07")
+        await download_file_async(sesion, f"{srv.base}/g.h5", str(tmp_path / "g.h5"))
+    # Listado: ficha sin slot. Descarga: ficha con el slot ocupado.
+    assert vistas == [False, True]

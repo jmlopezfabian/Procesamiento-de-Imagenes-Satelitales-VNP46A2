@@ -36,3 +36,21 @@ class CredencialesInvalidas(Exception):
     fallar igual, y registrarlo como un fallo más por fecha convertiría una
     corrida entera en miles de huecos con la misma causa.
     """
+
+
+class DescargaFallida(Exception):
+    """
+    Se agotaron los reintentos al listar o descargar: el gránulo puede existir.
+
+    Distinta de «no existe» (404, cuadrante fuera del listado, día sin publicar),
+    que es un resultado normal y se señala con None. Esto es un fallo transitorio
+    que no se recuperó (503 persistente, red caída, cuerpo ilegible): si se
+    tratara como falta de datos, un corte de NASA dejaría en la serie el mismo
+    hueco que una noche sin imagen. Las funciones públicas `find_file_async` y
+    `download_file_async` la traducen a None (su contrato no cambia); los lotes
+    usan las variantes que la lanzan y la anotan en `fallos`.
+    """
+
+    def __init__(self, motivo: str):
+        self.motivo = motivo
+        super().__init__(motivo)

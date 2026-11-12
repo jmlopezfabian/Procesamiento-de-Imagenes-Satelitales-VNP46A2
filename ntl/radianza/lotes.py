@@ -13,7 +13,8 @@ from ..core.config import (MAX_FECHAS_CONCURRENTES, PIXELES_MUNICIPIOS,
                            TEMP_DIR, data_path, temp_path)
 from ..core.errores import CredencialesInvalidas
 from ..core.utils import normalize_municipio, parse_date, load_coord_data
-from ..core.downloader import find_file_async, download_file_async
+from ..core.downloader import (buscar_archivo_async, bajar_archivo_async,
+                               iniciar_corrida, terminar_corrida)
 from ..core.productos import obtener_producto
 from .extraccion import process_image_mosaico
 from ..core.models import MedicionResultado
@@ -41,18 +42,23 @@ def cleanup_temp_files(directorio=None):
             except Exception as e:
                 print(f"Error eliminando archivo residual {file_path}: {e}")
 
-def save_progress(df, municipio, chunk_number=None):
+def save_progress(df, municipio, chunk_number=None, producto=None):
     """Guarda el progreso actual en Parquet, de forma atómica.
+
+    Con `producto` el nombre lo incluye (`{municipio}_{producto}_progress.parquet`):
+    dos corridas de productos distintos en el mismo DATA_DIR no se pisan el
+    checkpoint.
 
     Se escribe a un temporal y se renombra: si el proceso muere a mitad, el
     checkpoint anterior sigue entero en lugar de quedar un Parquet truncado.
     """
     filename = None
     try:
+        base = f"{municipio}_{producto}" if producto else municipio
         if chunk_number is not None:
-            filename = str(data_path(f"{municipio}_progress_chunk_{chunk_number}.parquet"))
+            filename = str(data_path(f"{base}_progress_chunk_{chunk_number}.parquet"))
         else:
-            filename = str(data_path(f"{municipio}_progress.parquet"))
+            filename = str(data_path(f"{base}_progress.parquet"))
 
         temporal = f"{filename}.{uuid.uuid4().hex}.tmp"
         try:
@@ -114,20 +120,24 @@ class SatelliteImagesAsync:
 
     async def _bajar_h5(self, session, year, day, cuadrante, date_obj, cache_key):
         print(f"🔍 Buscando archivo H5 para: {year}-{day} ({cuadrante})")
-        h5_url = await find_file_async(session, year, day, cuadrante, self.producto)
+        # Las variantes que lanzan `DescargaFallida` al agotar reintentos: aquí
+        # None solo significa «no existe», y un fallo de red no puede pasar por
+        # falta de datos. La excepción sube a `get_measures_for_date`, que la
+        # anota en `fallos`.
+        h5_url = await buscar_archivo_async(session, year, day, cuadrante, self.producto)
         if not h5_url:
             print(f"❌ No se encontró archivo H5 para: {year}-{day} ({cuadrante})")
             return None
 
         save_path = self._ruta_temp(f"{date_obj}_{self.producto.nombre}_{cuadrante}.h5")
         print(f"📥 Descargando: {h5_url} -> {save_path}")
-        downloaded_path = await download_file_async(session, h5_url, save_path)
+        downloaded_path = await bajar_archivo_async(session, h5_url, save_path)
 
         if downloaded_path:
             self.cache_h5_files[cache_key] = downloaded_path
             print(f"✅ Archivo H5 descargado y cacheado: {cache_key}")
             return downloaded_path
-        print(f"❌ Error descargando archivo H5: {h5_url}")
+        print(f"❌ El archivo H5 no existe en el servidor: {h5_url}")
         return None
 
     async def _download_and_cache_h5(self, session, year, day, cuadrante, date_obj):
@@ -253,6 +263,9 @@ class SatelliteImagesAsync:
                         # El borrado lo decide el contador, no el municipio: la
                         # misma imagen le sirve al siguiente.
                         delete_files=False,
+                        # El archivo declara su producto (ShortName): si no es
+                        # el de esta instancia, se rechaza en vez de mezclarlo.
+                        producto=self.producto.nombre,
                     )
                     if datos:
                         results.append(datos.model_dump())
@@ -325,8 +338,11 @@ class SatelliteImagesAsync:
         vez lo decide aparte el limitador global (core.limitador).
 
         `chunks` es cada cuántas fechas completadas se reescribe el checkpoint,
-        un único archivo (`multi_municipio_progress.parquet`) que se reemplaza
+        un único archivo (`multi_municipio_{producto}_progress.parquet`) que se reemplaza
         de forma atómica. Si la corrida aborta se guarda una última vez.
+
+        `self.fallos` se reinicia al empezar: describe esta corrida, no la suma
+        de las anteriores de la instancia.
 
         Las fechas repetidas se procesan una sola vez. Una medición que falla no
         detiene la corrida: se anota en `self.fallos` y se resume al terminar.
@@ -350,6 +366,7 @@ class SatelliteImagesAsync:
         # al final, sin tocar los .h5 de otra corrida que comparta TEMP_DIR.
         self._vuelo = {}
         self.cache_h5_files = {}
+        self.fallos = []
         self._dir_temp = Path(TEMP_DIR) / f"run_{uuid.uuid4().hex}"
         self._dir_temp.mkdir(parents=True, exist_ok=True)
 
@@ -362,7 +379,8 @@ class SatelliteImagesAsync:
                 if filas:
                     # Armar el DataFrame y escribir el Parquet bloquea: en un hilo.
                     await asyncio.to_thread(
-                        lambda: save_progress(pd.DataFrame(filas), "multi_municipio"))
+                        lambda: save_progress(pd.DataFrame(filas), "multi_municipio",
+                                              producto=self.producto.nombre))
 
         async def worker():
             nonlocal completadas
@@ -381,6 +399,7 @@ class SatelliteImagesAsync:
                     await _checkpoint()
 
         workers = []
+        iniciar_corrida()
         try:
             async with aiohttp.ClientSession() as session:
                 # Tareas explícitas: si una falla o se cancela `run`, se cancelan
@@ -408,6 +427,9 @@ class SatelliteImagesAsync:
             shutil.rmtree(self._dir_temp, ignore_errors=True)
             self._dir_temp = None
             self._vuelo = {}
+            # Los listados recordados son fotos de un momento: no se llevan a la
+            # siguiente corrida de un proceso largo (ni se retienen sin fin).
+            terminar_corrida()
             self._resumir_fallos(len(_filas()), save_progress_enabled)
 
         return pd.DataFrame(_filas())
@@ -432,7 +454,7 @@ class SatelliteImagesAsync:
               f"no es porque no hubiera imagen. El detalle está en `.fallos`.")
         if guardar:
             try:
-                ruta = data_path("fallos.parquet")
+                ruta = data_path(f"fallos_{self.producto.nombre}.parquet")
                 pd.DataFrame(self.fallos).to_parquet(ruta, index=False)
                 print(f"   Detalle guardado en {ruta}")
             except Exception as e:

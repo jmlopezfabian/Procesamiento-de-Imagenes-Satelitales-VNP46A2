@@ -86,3 +86,42 @@ def test_valores_por_omision_de_la_config(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+async def test_tasa_cero_significa_sin_limite_de_ritmo():
+    """NTL_MAX_PETICIONES_POR_SEG=0 daba ZeroDivisionError al calcular la espera."""
+    lim = Limitador(max_descargas=2, peticiones_por_seg=0)
+    t0 = time.perf_counter()
+    for _ in range(500):
+        await lim.esperar_turno()
+    assert time.perf_counter() - t0 < 0.5
+
+
+async def test_tasa_cero_respeta_la_pausa_por_penalizacion():
+    lim = Limitador(max_descargas=2, peticiones_por_seg=0)
+    lim.penalizar(0.2)
+    t0 = time.perf_counter()
+    await lim.esperar_turno()
+    assert time.perf_counter() - t0 >= 0.15
+
+
+def _importar_config(**entorno):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    raiz = Path(__file__).resolve().parents[2]
+    env = {**os.environ, **entorno}
+    env.pop("NTL_PRODUCTO", None)
+    return subprocess.run(
+        [sys.executable, "-c",
+         "import ntl.core.config as c; print(c.MAX_PETICIONES_POR_SEG)"],
+        cwd=raiz, env=env, capture_output=True, text=True)
+
+
+def test_config_acepta_cero_y_rechaza_negativos_al_importar():
+    ok = _importar_config(NTL_MAX_PETICIONES_POR_SEG="0")
+    assert ok.returncode == 0 and ok.stdout.strip() == "0.0", ok.stderr
+    mal = _importar_config(NTL_MAX_PETICIONES_POR_SEG="-3")
+    assert mal.returncode != 0
+    assert "NTL_MAX_PETICIONES_POR_SEG" in mal.stderr

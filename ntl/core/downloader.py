@@ -5,9 +5,16 @@ Aquí es donde la distinción entre síncrono y asíncrono es real: el resto del
 procesamiento no la necesita. Las funciones bloqueantes sirven para una consulta
 puntual; las asíncronas, con sufijo `_async`, para los lotes.
 
-Contrato de las funciones asíncronas: devuelven None cuando el gránulo no existe
-o se agotan los reintentos, y lanzan `CredencialesInvalidas` cuando LAADS
-rechaza el token (reintentar no sirve y lo demás fallará igual).
+Contrato de las funciones asíncronas públicas (`find_file_async`,
+`download_file_async`): devuelven None cuando el gránulo no existe o se agotan
+los reintentos, y lanzan `CredencialesInvalidas` cuando LAADS rechaza el token
+(reintentar no sirve y lo demás fallará igual).
+
+Los lotes necesitan distinguir esos dos None: «no existe» es un dato normal y
+«se agotaron los reintentos» es un fallo que debe quedar anotado. Para eso están
+`buscar_archivo_async` y `bajar_archivo_async`, que hacen lo mismo pero lanzan
+`DescargaFallida` al agotar reintentos; las públicas son envoltorios que la
+traducen a None.
 """
 import asyncio
 import contextlib
@@ -16,7 +23,6 @@ import os
 import random
 import time
 import uuid
-import weakref
 from collections import OrderedDict
 from datetime import date, timedelta
 from typing import NamedTuple
@@ -27,8 +33,9 @@ import requests
 
 from . import config
 from .config import CHUNK_SIZE, HEADERS
-from .errores import CredencialesInvalidas
+from .errores import CredencialesInvalidas, DescargaFallida
 from .limitador import obtener_limitador
+from .por_loop import estado_del_loop
 from .productos import obtener_producto
 
 FIRMA_HDF5 = b"\x89HDF\r\n\x1a\n"
@@ -63,6 +70,21 @@ class _Reintentar(Exception):
         self.penalizar = penalizar
 
 
+class _RespuestaHTML(_Reintentar):
+    """
+    200 con HTML donde debía venir HDF5 o JSON.
+
+    LAADS lo usa para la página de login cuando el token no vale, pero también
+    para páginas de mantenimiento o de error de un balanceador: ambiguo. Se
+    reintenta como transitorio y solo si se repite (o se agotan los intentos) se
+    toma por credenciales inválidas; ver `_con_reintentos`.
+    """
+
+    def __init__(self, motivo, mensaje_credenciales):
+        super().__init__(motivo)
+        self.mensaje_credenciales = mensaje_credenciales
+
+
 class _Definitivo(Exception):
     """Fallo que reintentar no arregla (404, 410...): el resultado es None."""
 
@@ -70,6 +92,7 @@ class _Definitivo(Exception):
 # Se pueden parchear en pruebas sin tocar el reloj de todo asyncio.
 _dormir = asyncio.sleep
 _aleatorio = random.uniform
+_reloj = time.monotonic
 
 
 class _Entrada(NamedTuple):
@@ -334,53 +357,127 @@ async def _con_reintentos(intento, descripcion, max_intentos, base, pesada=False
     """
     Ejecuta `intento()` con backoff exponencial y full jitter.
 
-    Devuelve su resultado, o None si es un fallo definitivo o se agotan los
-    intentos. `CredencialesInvalidas` y todo lo que no sea red (ENOSPC, bugs)
-    se propagan: reintentarlos escondería el problema.
+    Devuelve su resultado, o None si es un fallo definitivo (404...: no existe).
+    Si se agotan los intentos lanza `DescargaFallida` (los públicos la traducen
+    a None, los lotes la anotan). `CredencialesInvalidas` y todo lo que no sea
+    red (ENOSPC, bugs) se propagan: reintentarlos escondería el problema.
+
+    Un 200 con HTML (`_RespuestaHTML`) se reintenta una vez como transitorio; si
+    se repite en dos intentos seguidos, o es el último intento, se da por token
+    inválido.
     """
     limitador = obtener_limitador()
     tope = config.BACKOFF_TOPE
+    html_seguidos = 0
     for n in range(1, max_intentos + 1):
-        await limitador.esperar_turno()
         try:
             if pesada:
                 async with limitador.descarga():
+                    # La ficha del bucket se toma ya con el slot en mano: si se
+                    # tomara antes, quien espera slot la gastaría sin pedir nada
+                    # y, al llegarle el turno, la tasa real hacia NASA superaría
+                    # la del bucket (varias descargas arrancando a la vez).
+                    await limitador.esperar_turno()
                     return await intento()
+            await limitador.esperar_turno()
             return await intento()
         except _Definitivo as e:
             print(f"{descripcion}: {e}; no se reintenta")
             return None
+        except _RespuestaHTML as e:
+            html_seguidos += 1
+            if html_seguidos >= 2 or n == max_intentos:
+                raise CredencialesInvalidas(e.mensaje_credenciales) from None
+            motivo, pedida, penalizar = e.motivo, e.espera, e.penalizar
         except _Reintentar as e:
+            html_seguidos = 0
             motivo, pedida, penalizar = e.motivo, e.espera, e.penalizar
         except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as e:
+            html_seguidos = 0
             motivo, pedida, penalizar = f"{type(e).__name__}: {e}", None, False
 
-        if n == max_intentos:
-            print(f"{descripcion}: {motivo}; se agotaron los {max_intentos} intentos")
-            return None
         if pedida is not None:
             espera = min(pedida, tope)
         else:
             espera = _aleatorio(0, min(tope, base * 2 ** (n - 1)))
+        # También en el último intento: el 429/503 final sigue diciendo «vas muy
+        # rápido» y quien venga detrás (otro cuadrante, otra fecha) debe frenar.
         if penalizar:
             limitador.penalizar(espera)
+        if n == max_intentos:
+            print(f"{descripcion}: {motivo}; se agotaron los {max_intentos} intentos")
+            raise DescargaFallida(
+                f"{descripcion}: {motivo}; se agotaron los {max_intentos} intentos")
         print(f"{descripcion}: {motivo} (intento {n}/{max_intentos}); "
               f"reintentando en {espera:.1f} s")
         await _dormir(espera)
     return None
 
 
-# Listados de día ya pedidos, por event loop (un future no sirve en otro loop).
-_listados: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
-# url de descarga -> tamaño exacto anunciado por el listado, por loop. Lo consulta
-# download_file_async: el listado dice cuánto pesa el archivo aunque el servidor
-# no mande Content-Length (o lo mande de una respuesta comprimida).
-_tamanos: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 _MAX_TAMANOS = 8192
 
 
+class _EstadoLoop:
+    """
+    Cachés del downloader de un event loop (un future no sirve en otro loop).
+
+    Cuelga del propio loop (ver por_loop) y no de un diccionario global: sus
+    futures referencian al loop, y en un `WeakKeyDictionary` eso lo retenía
+    después de `asyncio.run`.
+    """
+
+    def __init__(self):
+        # Listados de día ya pedidos: (producto, año, día) -> future.
+        self.listados: OrderedDict = OrderedDict()
+        # Cuándo caduca (reloj monótono) cada 404 recordado de `listados`.
+        self.vence: dict = {}
+        # url de descarga -> tamaño exacto anunciado por el listado. Lo consulta
+        # download_file_async: el listado dice cuánto pesa el archivo aunque el
+        # servidor no mande Content-Length (o lo mande de una respuesta comprimida).
+        self.tamanos: OrderedDict = OrderedDict()
+        # Corridas de lotes en curso en este loop (ver iniciar_corrida).
+        self.corridas = 0
+
+
+def _estado() -> _EstadoLoop:
+    return estado_del_loop("downloader", _EstadoLoop)
+
+
+def olvidar_listados():
+    """
+    Vacía las cachés de listados y tamaños del loop en curso.
+
+    Un listado recordado es una foto: si se tomó cuando el día estaba a medio
+    publicar, seguiría sin el cuadrante que llegó después, y en un proceso largo
+    (una API) la foto duraría hasta que la desalojen otros 128 días.
+    """
+    estado = _estado()
+    estado.listados.clear()
+    estado.vence.clear()
+    estado.tamanos.clear()
+
+
+def iniciar_corrida():
+    """Los lotes avisan al empezar: mientras haya corridas en curso se comparten los listados."""
+    _estado().corridas += 1
+
+
+def terminar_corrida():
+    """
+    Al terminar la última corrida en curso del loop se vacían las cachés.
+
+    Se cuenta en vez de limpiar siempre porque varias instancias pueden correr a
+    la vez en el mismo loop y se reparten el listado de cada día: que la primera
+    en acabar lo borrara haría repetir peticiones a las demás.
+    """
+    estado = _estado()
+    estado.corridas = max(0, estado.corridas - 1)
+    if estado.corridas == 0:
+        olvidar_listados()
+
+
 def _recordar_tamanos(entradas):
-    tamanos = _tamanos.setdefault(asyncio.get_running_loop(), OrderedDict())
+    tamanos = _estado().tamanos
     for e in entradas.values():
         if e.size is not None:
             tamanos[e.url] = e.size
@@ -391,9 +488,42 @@ def _recordar_tamanos(entradas):
 
 def _tamano_esperado(url):
     try:
-        return _tamanos.get(asyncio.get_running_loop(), {}).get(url)
+        return _estado().tamanos.get(url)
     except RuntimeError:
         return None
+
+
+_MARCAS_HTML = (b"<html", b"<!doctype")
+
+
+def _es_html(cuerpo: bytes) -> bool:
+    inicio = cuerpo[:200].lstrip().lower()
+    return any(m in inicio for m in _MARCAS_HTML)
+
+
+async def _leer_json(resp, url):
+    """
+    Cuerpo JSON de un listado, o el fallo transitorio que corresponda.
+
+    Un 200 con cuerpo ilegible (truncado, no JSON, mal codificado) no es un
+    listado vacío ni un error definitivo: es un fallo transitorio. Si es HTML
+    (página de login o de mantenimiento) se trata como `_RespuestaHTML`.
+    """
+    try:
+        return await resp.json(content_type=None)
+    except (ValueError, aiohttp.ContentTypeError):
+        # JSONDecodeError y UnicodeDecodeError son ValueError. `json()` ya leyó
+        # el cuerpo y aiohttp lo guarda: `read()` lo devuelve sin pedirlo de nuevo.
+        try:
+            cuerpo = await resp.read()
+        except Exception:
+            cuerpo = b""
+        if _es_html(cuerpo):
+            raise _RespuestaHTML(
+                "el listado vino como HTML",
+                f"LAADS devolvió una página HTML en lugar del listado JSON ({url}): "
+                "el token NASA_API_TOKEN es inválido o expiró") from None
+        raise _Reintentar("el listado no es JSON válido (cuerpo truncado o ilegible)") from None
 
 
 async def _pedir_listado(session, url, max_intentos, base):
@@ -401,15 +531,14 @@ async def _pedir_listado(session, url, max_intentos, base):
         try:
             async with _get(session, url) as resp:
                 _evaluar_status(resp, url)
-                return await resp.json(content_type=None)
+                return await _leer_json(resp, url)
         except _Definitivo as e:
-            # 404 y compañía: el mismo pedido dará lo mismo, y se recuerda.
+            # 404 y compañía: el mismo pedido dará lo mismo, y se recuerda (con TTL).
             print(f"Listado {url}: {e}; no se reintenta")
             return _SIN_LISTADO
 
+    # Agotar reintentos lanza DescargaFallida: no es un listado vacío.
     datos = await _con_reintentos(intento, f"Listado {url}", max_intentos, base)
-    if datos is None:
-        return None
     if datos is _SIN_LISTADO:
         return _SIN_LISTADO
     entradas = _entradas_del_listado(datos)
@@ -422,17 +551,22 @@ async def _pedir_listado(session, url, max_intentos, base):
     return entradas
 
 
-def _olvidar_si_fallo(cache, clave):
+def _al_terminar(estado, clave):
     def _limpiar(fut):
         if fut.cancelled():
             fallo = True
         else:
             # Leer la excepción la da por atendida (si no, asyncio protesta).
             fallo = fut.exception() is not None or fut.result() is None
+            if not fallo and fut.result() is _SIN_LISTADO:
+                if config.TTL_LISTADO_404 > 0:
+                    estado.vence[clave] = _reloj() + config.TTL_LISTADO_404
+                else:
+                    fallo = True
         # Un fallo no se recuerda: ser transitorio es lo normal, y «todavía no
-        # publicado» cambia con las horas. Un 404 sí (_SIN_LISTADO no es None).
-        if fallo and cache.get(clave) is fut:
-            del cache[clave]
+        # publicado» cambia con las horas. Un 404 se recuerda solo un rato.
+        if fallo and estado.listados.get(clave) is fut:
+            del estado.listados[clave]
     return _limpiar
 
 
@@ -440,38 +574,48 @@ async def _listado_del_dia(session, producto, year, day, max_intentos=None, base
     """
     Archivos .h5 del día `nombre -> (downloadsLink, size, mtime)`, pedidos una sola vez.
 
-    Devuelve None si no se pudo listar o el día no está publicado (lista vacía),
-    y un dict vacío si LAADS respondió 404. El listado es el mismo para todos los
+    Devuelve None si el día no está publicado (lista vacía) y un dict vacío si
+    LAADS respondió 404 (recordado `TTL_LISTADO_404` segundos: un día sin publicar
+    también da 404 y se publica después). Si se agotan los reintentos lanza
+    `DescargaFallida`, y eso no se recuerda. El listado es el mismo para todos los
     cuadrantes de un día: se comparte el future (single-flight) en lugar de
     guardar solo el resultado, para que quienes llegan mientras el primero sigue
     esperando se sumen a su petición. La clave incluye el producto: el mismo día
     tiene un listado por producto.
     """
-    loop = asyncio.get_running_loop()
-    cache = _listados.setdefault(loop, OrderedDict())
+    estado = _estado()
+    cache = estado.listados
     clave = (producto.nombre, str(year), str(day))
     fut = cache.get(clave)
+    if fut is not None and clave in estado.vence and _reloj() >= estado.vence[clave]:
+        del cache[clave]
+        fut = None
     if fut is None:
+        estado.vence.pop(clave, None)
         url = producto.url_listado(year, day)
         fut = asyncio.ensure_future(_pedir_listado(
             session, url,
             max_intentos if max_intentos is not None else config.MAX_INTENTOS,
             base if base is not None else config.BACKOFF_BASE))
         cache[clave] = fut
-        fut.add_done_callback(_olvidar_si_fallo(cache, clave))
+        fut.add_done_callback(_al_terminar(estado, clave))
         while len(cache) > _MAX_LISTADOS:
-            cache.popitem(last=False)
+            viejo, _ = cache.popitem(last=False)
+            estado.vence.pop(viejo, None)
     else:
         cache.move_to_end(clave)
     # shield: que cancelar a un llamador no mate la petición que comparten otros.
     return await asyncio.shield(fut)
 
 
-async def find_file_async(session, year, day, cuadrante, producto=None):
+async def buscar_archivo_async(session, year, day, cuadrante, producto=None):
     """
-    URL del .h5 del cuadrante ese día, o None si no existe o no se pudo listar.
+    URL del .h5 del cuadrante ese día, o None si no existe (día fuera de
+    vigencia, sin publicar, 404 o cuadrante ausente del listado).
 
-    Si el día cae fuera de la vigencia del producto devuelve None sin pedir nada.
+    Lanza `DescargaFallida` si se agotan los reintentos al listar y
+    `CredencialesInvalidas` ante un token rechazado. Es la variante que usan los
+    lotes; `find_file_async` es la pública que traduce el fallo a None.
     """
     producto = obtener_producto(producto)
     motivo = _motivo_fuera_de_rango(producto, year, day)
@@ -487,6 +631,20 @@ async def find_file_async(session, year, day, cuadrante, producto=None):
               f"{cuadrante} en {year}-{day}")
         return None
     return entrada.url
+
+
+async def find_file_async(session, year, day, cuadrante, producto=None):
+    """
+    URL del .h5 del cuadrante ese día, o None si no existe o no se pudo listar.
+
+    Si el día cae fuera de la vigencia del producto devuelve None sin pedir nada.
+    Lanza `CredencialesInvalidas` si LAADS rechaza el token. Quien necesite
+    distinguir «no existe» de «no se pudo listar» usa `buscar_archivo_async`.
+    """
+    try:
+        return await buscar_archivo_async(session, year, day, cuadrante, producto)
+    except DescargaFallida:
+        return None
 
 
 async def _escribir_y_validar(resp, parcial, url, esperado_listado=None):
@@ -535,10 +693,11 @@ async def _escribir_y_validar(resp, parcial, url, esperado_listado=None):
 def _revisar_firma(cabeza: bytes, url: str):
     if cabeza.startswith(FIRMA_HDF5):
         return
-    inicio = cabeza[:100].lower()
-    if b"<html" in inicio or b"<!doctype" in inicio:
-        # LAADS contesta 200 con la página de login cuando el token no vale.
-        raise CredencialesInvalidas(
+    if _es_html(cabeza):
+        # LAADS contesta 200 con la página de login cuando el token no vale, pero
+        # una página de mantenimiento se ve igual: `_con_reintentos` decide.
+        raise _RespuestaHTML(
+            "la descarga vino como HTML",
             f"LAADS devolvió una página HTML en lugar del HDF5 ({url}): "
             "el token NASA_API_TOKEN es inválido o expiró")
     raise _Reintentar("el contenido no tiene firma HDF5")
@@ -550,7 +709,21 @@ async def download_file_async(session, url, path, max_retries=None, delay=None):
 
     `max_retries` y `delay` (base del backoff, en segundos) toman por omisión
     NTL_MAX_INTENTOS y NTL_BACKOFF_BASE. Lanza `CredencialesInvalidas` ante un
-    401/403 o una página HTML con código 200.
+    401/403, o ante una página HTML con código 200 que se repite (la primera vez
+    se reintenta: puede ser mantenimiento). Quien necesite distinguir «no existe»
+    de «se agotaron los reintentos» usa `bajar_archivo_async`.
+    """
+    try:
+        return await bajar_archivo_async(session, url, path, max_retries, delay)
+    except DescargaFallida:
+        return None
+
+
+async def bajar_archivo_async(session, url, path, max_retries=None, delay=None):
+    """
+    Como `download_file_async`, pero lanza `DescargaFallida` al agotar reintentos.
+
+    Devuelve `path`, o None solo si el gránulo no existe (404/410...).
 
     Escribe a un `.part` único (pid + uuid) y lo renombra a `path` solo si el
     tamaño cuadra y la firma es HDF5: una conexión cortada o dos descargas

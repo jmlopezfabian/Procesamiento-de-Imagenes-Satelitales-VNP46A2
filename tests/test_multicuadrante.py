@@ -591,6 +591,18 @@ class TestNoHayMedicionVsNoSePuedeMedir:
             process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
                                   delete_files=False)
 
+    def test_producto_pedido_distinto_al_del_archivo_es_medicion_imposible(self, tmp_path):
+        coords = cuadrado(ESQUINA, 1.3)
+        piezas = cobertura_por_cuadrante(coords, FORMA)
+        rutas = {c: crear_cuadrante(tmp_path, c, producto="VNP46A2") for c in piezas}
+        with pytest.raises(MedicionImposible, match="se pidió VJ146A2"):
+            process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
+                                  delete_files=False, producto="VJ146A2")
+        # Si coincide, o no se pide ninguno (compatibilidad), se mide igual.
+        for pedido in ("VNP46A2", None):
+            assert process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
+                                         delete_files=False, producto=pedido) is not None
+
     def test_un_defecto_inesperado_propaga(self, tmp_path, monkeypatch):
         """
         Antes se tragaba y salía como None. Un bug tiene que llegar a quien

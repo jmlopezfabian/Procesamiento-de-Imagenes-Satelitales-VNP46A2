@@ -129,10 +129,21 @@ MAX_FECHAS_CONCURRENTES = int(_primera_definida("NTL_MAX_FECHAS_CONCURRENTES") o
 # MAX_INTENTOS / BACKOFF_*: reintentos ante errores transitorios, con espera
 #   exponencial (base · 2^n) y tope; un Retry-After del servidor manda sobre ella.
 MAX_DESCARGAS = max(1, int(_primera_definida("NTL_MAX_DESCARGAS") or 4))
+# NTL_MAX_PETICIONES_POR_SEG=0 desactiva el límite de ritmo (queda el de descargas
+# simultáneas y la pausa ante 429/503); un valor negativo es un error de
+# configuración y se rechaza al importar en vez de fallar a mitad de una corrida.
 MAX_PETICIONES_POR_SEG = float(_primera_definida("NTL_MAX_PETICIONES_POR_SEG") or 2)
+if MAX_PETICIONES_POR_SEG < 0:
+    raise ValueError(
+        f"NTL_MAX_PETICIONES_POR_SEG={MAX_PETICIONES_POR_SEG} no es válido: usa un "
+        f"número positivo, o 0 para no limitar el ritmo")
 MAX_INTENTOS = max(1, int(_primera_definida("NTL_MAX_INTENTOS") or 5))
 BACKOFF_BASE = float(_primera_definida("NTL_BACKOFF_BASE") or 2)
 BACKOFF_TOPE = float(_primera_definida("NTL_BACKOFF_TOPE") or 120)
+# Cuánto se recuerda que el listado de un día respondió 404 (s). Un día aún no
+# publicado da 404 y se publica después: recordarlo para siempre lo dejaría como
+# «sin datos» en cualquier proceso largo. 0 = no recordarlo.
+TTL_LISTADO_404 = max(0.0, float(_primera_definida("NTL_TTL_LISTADO_404") or 600))
 
 
 # Where the Parquet results are written.

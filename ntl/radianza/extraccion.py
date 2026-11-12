@@ -331,7 +331,7 @@ def _normalizar_piezas(piezas) -> dict[str | None, list[tuple[int, int, float]]]
 
 
 def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
-                          delete_files=True):
+                          delete_files=True, producto=None):
     """
     Métricas de un municipio repartido entre varios cuadrantes.
 
@@ -371,6 +371,9 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
         date_obj: Fecha de la medición
         municipio: Nombre del municipio
         delete_files: Si borrar los HDF5 al terminar
+        producto: nombre del producto que se pidió (p.ej. "VJ146A2"). Si se da y
+            algún archivo declara otro `ShortName`, es `MedicionImposible`: la
+            radianza de un producto no se publica con la etiqueta de otro.
 
     Returns:
         MedicionResultado, o None si no hay medición que calcular.
@@ -407,6 +410,11 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
                 f"los cuadrantes vienen de productos distintos "
                 f"{sorted(productos_leidos)} y no se pueden componer",
                 municipio, date_obj)
+
+        if producto is not None and productos_leidos - {str(producto)}:
+            raise MedicionImposible(
+                f"se pidió {producto} pero los archivos declaran "
+                f"{sorted(productos_leidos)}", municipio, date_obj)
 
         faltantes = [c for c in piezas_norm if c not in matrices]
         if not matrices:

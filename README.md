@@ -265,7 +265,8 @@ que antes eran indistinguibles:
 |---|---|---|
 | Falta una de varias imágenes | Sale el registro, parcial | `Fraccion_valida < 1`, `Cuadrantes_faltantes` |
 | No hay imagen, o la noche estaba nublada | No sale registro | Fila ausente. **Es un dato**, no un defecto |
-| La cobertura y las imágenes se contradicen | `MedicionImposible` | Anotado en `sat.fallos` |
+| La cobertura y las imágenes se contradicen (o el archivo es de otro producto que el pedido) | `MedicionImposible` | Anotado en `sat.fallos` |
+| Se agotaron los reintentos al listar o descargar (503 persistente, red caída, cuerpo ilegible) | `DescargaFallida` | Anotado en `sat.fallos`; no es «sin datos» |
 | Cualquier otro error | Propaga | Anotado en `sat.fallos` |
 
 Antes las tres últimas se atrapaban y salían como «no hay datos»: en una serie de
@@ -273,7 +274,7 @@ diez años, una noche nublada y un defecto del código dejaban exactamente el mi
 hueco, y no había manera de decir cuál fue cuál.
 
 Un fallo no detiene la corrida. Al terminar se resume y se guarda el detalle en
-`data/fallos.parquet`:
+`data/fallos_{producto}.parquet` (p. ej. `fallos_VJ146A2.parquet`, para que dos corridas de productos distintos no se pisen; `sat.fallos` se reinicia al empezar cada `run()`):
 
 ```
 ⚠️ 3 de 6570 mediciones fallaron (0.05%): 2 KeyError, 1 OSError. Faltan esas
@@ -373,10 +374,11 @@ incluidos; si NASA pide esperar (`Retry-After`), se pausa a todas las tareas.
 | Variable | Por omisión | Qué hace |
 |---|---|---|
 | `NTL_MAX_DESCARGAS` | 4 | Gránulos bajándose a la vez, sumando todas las instancias del proceso |
-| `NTL_MAX_PETICIONES_POR_SEG` | 2 | Ritmo máximo de peticiones a LAADS |
+| `NTL_MAX_PETICIONES_POR_SEG` | 2 | Ritmo máximo de peticiones a LAADS. `0` = sin límite de ritmo; un negativo falla al importar |
 | `NTL_MAX_INTENTOS` | 5 | Intentos por petición ante errores transitorios |
 | `NTL_BACKOFF_BASE` | 2 (s) | Base de la espera exponencial con jitter |
 | `NTL_BACKOFF_TOPE` | 120 (s) | Tope de cualquier espera, incluido un `Retry-After` |
+| `NTL_TTL_LISTADO_404` | 600 (s) | Cuánto se recuerda un 404 del listado de un día (un día aún no publicado también da 404). `0` = no recordarlo |
 
 Se reintentan 408/425/429/5xx y los errores de conexión o timeout; 400/404/410 no.
 Un 401/403, o una página HTML de login donde debía venir el HDF5, lanza
