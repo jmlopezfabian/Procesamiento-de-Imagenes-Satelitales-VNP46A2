@@ -388,6 +388,7 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
         rellenadas: dict[str | None, np.ndarray | None] = {}
         antiguedades: dict[str | None, np.ndarray | None] = {}
         lectura = None
+        productos_leidos: set[str] = set()
         for cuadrante in piezas_norm:
             ruta = rutas_por_cuadrante.get(cuadrante)
             leido = _leer_cuadrante(ruta, cuadrante) if ruta else None
@@ -397,6 +398,15 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
             rellenadas[cuadrante] = lectura_cuadrante.get("rellenada")
             antiguedades[cuadrante] = lectura_cuadrante.get("antiguedad")
             lectura = lectura or lectura_cuadrante
+            productos_leidos.add(lectura_cuadrante["producto"])
+
+        if len(productos_leidos) > 1:
+            # Los productos no son intercambiables sin calibrar (ver
+            # core.productos): un mosaico mezclado no tiene una escala única.
+            raise MedicionImposible(
+                f"los cuadrantes vienen de productos distintos "
+                f"{sorted(productos_leidos)} y no se pueden componer",
+                municipio, date_obj)
 
         faltantes = [c for c in piezas_norm if c not in matrices]
         if not matrices:

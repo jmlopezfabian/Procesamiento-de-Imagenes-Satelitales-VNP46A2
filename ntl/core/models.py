@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, model_validator
-from typing import List, Optional, Tuple
+from typing import List, Literal, Optional, Tuple
 from datetime import date
 
 class PiezaCuadrante(BaseModel):
@@ -152,13 +152,16 @@ class MedicionResultado(BaseModel):
     Percentil_25_de_radianza: float = Field(..., description="25th percentile of the radiance")
     Percentil_50_de_radianza: float = Field(..., description="50th percentile of the radiance")
     Percentil_75_de_radianza: float = Field(..., description="75th percentile of the radiance")
-    Producto: str = Field(
-        "VNP46A2",
+    Producto: Literal["VNP46A2", "VJ146A2"] = Field(
+        ...,
         description=(
-            "Black Marble product the radiance came from. Always VNP46A2: "
-            "BRDF/lunar-corrected with per-pixel quality flags. Series produced "
-            "before this became mandatory used raw at-sensor radiance and their "
-            "levels differ by 10-20%: do not mix them with these."
+            "Black Marble product the radiance came from, as declared by the HDF5 "
+            "file (ShortName): VNP46A2 (Suomi NPP, ends 2026-11-02) or VJ146A2 "
+            "(NOAA-20). Both are BRDF/lunar-corrected with per-pixel quality "
+            "flags, but they are NOT interchangeable without calibration: do not "
+            "splice series from different products. Series produced before this "
+            "became mandatory used raw at-sensor radiance (VNP46A1) and their "
+            "levels differ by 10-20%."
         ),
     )
     Unidades_de_radianza: str = Field(

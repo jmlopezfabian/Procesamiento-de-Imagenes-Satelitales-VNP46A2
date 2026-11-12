@@ -1,5 +1,5 @@
 """
-Descarga las imágenes VNP46A2 de 8 cuadrantes (H06V06..H09V06 y H06V07..H09V07)
+Descarga las imágenes Black Marble (VJ146A2 por omisión) de 8 cuadrantes (H06V06..H09V06 y H06V07..H09V07)
 para un día dado y las une en un único mosaico en blanco y negro (escala de grises).
 
 Requiere NASA_API_TOKEN en el .env (token de LAADS DAAC / Earthdata) para poder

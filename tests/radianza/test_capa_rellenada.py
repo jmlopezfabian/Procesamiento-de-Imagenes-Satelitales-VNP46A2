@@ -30,6 +30,7 @@ def _granulo(tmp_path, *, calidad, rellenada=None, antiguedad=None, principal=No
     """Gránulo 10x10 con las capas que se le pidan."""
     ruta = tmp_path / "g.h5"
     with h5py.File(ruta, "w") as f:
+        f.attrs["ShortName"] = b"VNP46A2"
         g = f.create_group(GRUPO)
 
         principal = np.full((10, 10), 50.0, dtype=np.float32) if principal is None else principal

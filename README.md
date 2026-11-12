@@ -1,7 +1,7 @@
 ## Procesamiento de Imágenes Satelitales Black Marble
 
-Proyecto para procesar imágenes satelitales de luminosidad nocturna del producto **VNP46A2**
-(Black Marble, NASA) y obtener métricas de radianza por municipio.
+Proyecto para procesar imágenes satelitales de luminosidad nocturna de Black Marble (NASA):
+**VJ146A2** (NOAA-20, por omisión) o **VNP46A2** (Suomi NPP, hasta el 2026-11-02) y obtener métricas de radianza por municipio.
 
 Es una **librería**: el tablero y el servicio que la usan a diario viven en
 daily-ntl. Ver "Dónde vive la aplicación".
@@ -19,8 +19,8 @@ El paquete `ntl/` está dividido por responsabilidad, no por modelo de concurren
 
 El paquete se llama `ntl` por *nighttime lights*, el acrónimo con el que la literatura
 nombra el fenómeno y que el reporte técnico ya usa como notación ($NTL_{i,j}$). No lleva
-el identificador del producto de la NASA para no atarse a él: VNP46A1 es hoy la fuente,
-pero el procesamiento no depende de que lo siga siendo.
+el identificador del producto de la NASA para no atarse a él: la fuente ya cambió una vez
+(VNP46A1, luego VNP46A2, ahora VJ146A2) y el procesamiento no depende de cuál sea.
 
 `geometria` produce lo que `radianza` consume. La distinción entre síncrono y asíncrono
 vive únicamente en `core/downloader.py`, donde las funciones asíncronas llevan el sufijo
@@ -75,7 +75,7 @@ abajo.
 ![Flujo de píxeles y huecos](images/Flujo_pixeles_hueco.PNG)
 
 1. Para cada fecha y municipio:
-   - Se descarga el archivo HDF5 VNP46A1 correspondiente (NASA).
+   - Se descarga el archivo HDF5 del producto elegido (VJ146A2 por omisión; NASA).
    - Se recorta la imagen usando la tabla de cobertura del municipio.
 2. Se calculan métricas de radianza **ponderando cada píxel por la fracción que el
    municipio cubre de él**, y se modelan con `MedicionResultado`.
@@ -92,13 +92,38 @@ con `python scripts/generar_coordenadas_pixeles.py`; solo hace falta si cambian 
 polígonos municipales. La cobertura se calcula por intersección geométrica exacta,
 sin factor de subdivisión ni pesos que elegir.
 
-### Producto: VNP46A2 por omisión
+### Productos: VJ146A2 por omisión
 
-Se lee **VNP46A2**, la escena corregida por BRDF lunar y atmósfera, con
-`Mandatory_Quality_Flag` por píxel. **Es el único producto soportado.** Un archivo que
-no traiga la bandera de calidad se rechaza en vez de procesarse sin filtrar.
+Se leen productos diarios de Black Marble corregidos por BRDF lunar y atmósfera, con
+`Mandatory_Quality_Flag` por píxel. Los soportados están en `ntl.core.productos`:
 
-VNP46A1 —radianza cruda al sensor— quedó fuera a propósito. No trae ninguna bandera que
+| Producto | Satélite | Cobertura | |
+|---|---|---|---|
+| `VNP46A2` | Suomi NPP | 2012-01-19 a **2026-11-02** (día 2026-306) | Suomi NPP dejó de entregar datos el 2 de noviembre de 2026 |
+| `VJ146A2` | NOAA-20 (JPSS-1) | desde 2018-01-05, vigente | **Por omisión**: el único que sigue publicando |
+
+Ambos son colección 5200 y comparten algoritmo, retícula y formato HDF5. El producto de
+cada registro sale del atributo raíz `ShortName` del archivo, y `Producto` lo lleva
+(`"VNP46A2"` o `"VJ146A2"`). Para elegir otro:
+
+- `NTL_PRODUCTO=VNP46A2` en el entorno (o `.env`) cambia el valor por omisión;
+- `SatelliteImagesAsync(municipios, producto="VNP46A2")` y
+  `SatelliteProcessor(municipio, producto="VNP46A2")` lo fijan por instancia.
+
+Una fecha fuera de la vigencia del producto no se pide a NASA: en `SatelliteImagesAsync`
+queda en `fallos` (tipo `ProductoFueraDeRango`, con el motivo) y en modo `estricto` lanza
+`ValueError`. La librería nunca elige el producto según la fecha por su cuenta.
+
+> **Advertencia de calibración.** Los dos productos **no son intercambiables sin
+> calibrar**. Una sola noche, sobre CDMX: VJ146A2 dio ~16-23% más que VNP46A2 en píxeles
+> de calidad 0, y en el tile completo ~17-27% menos. Es una observación aislada, no una
+> calibración: solo indica que hace falta calibrar en el traslape 2018-2026 antes de
+> empalmar una serie de VNP46A2 con una de VJ146A2. Hasta entonces, no las concatenes.
+
+VNP46A1 —radianza cruda al sensor— sigue fuera a propósito: un archivo cuyo `ShortName` no
+sea VNP46A2 o VJ146A2 se rechaza.
+
+VNP46A1 no trae ninguna bandera que
 permita descartar una observación inservible: una noche completamente nublada produce un
 número plausible que no es luz del suelo. Dejarlo disponible como opción invitaba a
 producir series que parecen válidas y no lo son.
@@ -111,7 +136,7 @@ El efecto sobre la serie es grande. Variación día a día sobre cinco fechas de
 | Azcapotzalco | 12.8% | **3.4%** |
 | Milpa Alta | 23.9% | **12.0%** |
 
-En una de esas cinco fechas, el 5 de enero, VNP46A2 no tiene **ni un píxel utilizable**
+En una de esas cinco fechas, el 5 de enero, VNP46A2 no tenía **ni un píxel utilizable**
 en Iztapalapa: estaba 100% nublado. VNP46A1 entregaba 62,838 como si fuera una medición.
 
 Las series generadas antes de este cambio usan VNP46A1 y sus niveles difieren entre 10% y
@@ -186,7 +211,7 @@ Cada fecha en vuelo retiene sus gránulos —uno por cuadrante— desde la prime
 descarga hasta que termina su último municipio, así que el pico de disco es:
 
 ```
-pico ≈ NTL_MAX_FECHAS_CONCURRENTES × cuadrantes de la región × ~250 MB
+pico ≈ NTL_MAX_FECHAS_CONCURRENTES × cuadrantes de la región × ~16 MB (tiles de México; el mayor del día ronda 30 MB)
 ```
 
 Por omisión son **4 fechas a la vez**: con una región de dos cuadrantes, unos 2 GB.
@@ -337,6 +362,31 @@ se compruebe en cada cambio.
 que **no se salte ninguna prueba**: sin `pyproj`, las que comparan la cobertura
 contra el área geodésica sobre WGS84 se saltaban en silencio, y son la
 verdad-terreno de la tabla.
+
+### Límites de NASA y reintentos
+
+LAADS DAAC limita las peticiones por usuario y responde 429/503 si se excede. Todas
+las descargas del proceso pasan por un limitador global (`ntl.core.limitador`) que
+acota las descargas pesadas simultáneas y el ritmo de **toda** petición, listados
+incluidos; si NASA pide esperar (`Retry-After`), se pausa a todas las tareas.
+
+| Variable | Por omisión | Qué hace |
+|---|---|---|
+| `NTL_MAX_DESCARGAS` | 4 | Gránulos bajándose a la vez, sumando todas las instancias del proceso |
+| `NTL_MAX_PETICIONES_POR_SEG` | 2 | Ritmo máximo de peticiones a LAADS |
+| `NTL_MAX_INTENTOS` | 5 | Intentos por petición ante errores transitorios |
+| `NTL_BACKOFF_BASE` | 2 (s) | Base de la espera exponencial con jitter |
+| `NTL_BACKOFF_TOPE` | 120 (s) | Tope de cualquier espera, incluido un `Retry-After` |
+
+Se reintentan 408/425/429/5xx y los errores de conexión o timeout; 400/404/410 no.
+Un 401/403, o una página HTML de login donde debía venir el HDF5, lanza
+`ntl.CredencialesInvalidas` sin reintentos, y `SatelliteImagesAsync.run` aborta el
+lote: con el token mal todo lo demás fallaría igual. `find_file_async` y
+`download_file_async` siguen devolviendo `None` si el gránulo no existe o se agotan
+los reintentos.
+
+Cada corrida descarga a su propio subdirectorio `NTL_TEMP_DIR/run_<uuid>` y lo borra
+al terminar, así que dos corridas con el mismo `NTL_TEMP_DIR` no se pisan.
 
 ---
 

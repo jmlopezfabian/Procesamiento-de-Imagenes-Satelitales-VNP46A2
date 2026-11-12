@@ -22,20 +22,10 @@ def fixtures_dir():
 
 
 @pytest.fixture
-def sample_directory_html(fixtures_dir):
-    """HTML content of a NASA directory listing with .h5 link for h08v07."""
-    path = fixtures_dir / "sample_directory.html"
-    return path.read_text(encoding="utf-8")
-
-
-@pytest.fixture
-def sample_directory_html_with_full_url():
-    """HTML with full URL in href (alternative format)."""
-    return """
-    <html><body>
-    <a href="https://ladsweb.modaps.eosdis.nasa.gov/archive/allData/5200/VNP46A2/2024/001/VNP46A2.A2024001.h08v07.002.2024003022532.h5">file</a>
-    </body></html>
-    """
+def sample_listado_json(fixtures_dir):
+    """Listado JSON de LAADS (details/allData) con los cuadrantes h08v07 y h09v07 de VJ146A2."""
+    import json
+    return json.loads((fixtures_dir / "sample_listado.json").read_text(encoding="utf-8"))
 
 
 @pytest.fixture
@@ -65,6 +55,8 @@ def sample_hdf5_path(tmp_path):
     )
 
     with h5py.File(h5_path, "w") as f:
+
+        f.attrs["ShortName"] = b"VNP46A2"
         grp = f.create_group(grupo)
         ds = grp.create_dataset("DNB_BRDF-Corrected_NTL", data=radiance)
         ds.attrs["_FillValue"] = np.float32(-999.9)
@@ -134,3 +126,34 @@ def mock_hdf5_file():
         raise KeyError(key)
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def red_sin_esperas(monkeypatch):
+    """
+    Descargas sin esperas reales y con un limitador nuevo en cada prueba.
+
+    Los reintentos duermen segundos de verdad y el bucket de peticiones va a
+    2/s: con ellos cada prueba de red tardaría lo que tarda NASA. `esperas`
+    recoge lo que el código habría dormido para poder comprobarlo.
+    """
+    import ntl.core.config as config
+    import ntl.core.downloader as downloader
+    from ntl.core.limitador import reiniciar_limitador
+
+    esperas = []
+
+    async def _dormir(segundos):
+        esperas.append(segundos)
+
+    monkeypatch.setattr(downloader, "_dormir", _dormir)
+    monkeypatch.setattr(config, "MAX_PETICIONES_POR_SEG", 10_000.0)
+    reiniciar_limitador()
+    yield esperas
+    reiniciar_limitador()
+
+
+@pytest.fixture
+def esperas(red_sin_esperas):
+    """Lista de esperas (s) que los reintentos pidieron dormir."""
+    return red_sin_esperas

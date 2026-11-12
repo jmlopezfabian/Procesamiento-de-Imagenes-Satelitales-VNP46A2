@@ -7,39 +7,38 @@ from ntl.core.downloader import find_file, download_file, is_valid_hdf5_file
 
 
 class TestFindFile:
-    def test_returns_url_when_html_has_h5_link(self, sample_directory_html):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.text = sample_directory_html
-        with patch("ntl.core.downloader.requests.get", return_value=mock_resp):
+    def _resp(self, status=200, datos=None):
+        r = MagicMock()
+        r.status_code = status
+        r.json.return_value = datos
+        return r
+
+    def test_devuelve_el_downloads_link_del_cuadrante(self, sample_listado_json):
+        with patch("ntl.core.downloader.requests.get",
+                   return_value=self._resp(200, sample_listado_json)) as get:
             url = find_file(2024, 1, "h08v07")
-        assert url is not None
-        assert "h08v07" in url
-        assert url.endswith(".h5")
+        assert url.endswith("VJ146A2.A2024001.h08v07.002.2024003022532.h5")
+        # Pide el endpoint JSON del producto por omisión.
+        assert get.call_args.args[0].endswith("/api/v2/content/details/allData/5200/VJ146A2/2024/001/")
 
     def test_returns_none_when_status_not_200(self):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        with patch("ntl.core.downloader.requests.get", return_value=mock_resp):
-            url = find_file(2024, 1, "h08v07")
-        assert url is None
+        with patch("ntl.core.downloader.requests.get", return_value=self._resp(404)):
+            assert find_file(2024, 1, "h08v07") is None
 
-    def test_returns_none_when_no_matching_link(self, sample_directory_html):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.text = "<html><body><a href='other.h5'>x</a></body></html>"
-        with patch("ntl.core.downloader.requests.get", return_value=mock_resp):
-            url = find_file(2024, 1, "h99v99")
-        assert url is None
+    def test_returns_none_when_no_matching_link(self, sample_listado_json):
+        with patch("ntl.core.downloader.requests.get",
+                   return_value=self._resp(200, sample_listado_json)):
+            assert find_file(2024, 1, "h99v99") is None
 
-    def test_returns_full_url_when_href_is_relative(self, sample_directory_html):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.text = sample_directory_html
-        with patch("ntl.core.downloader.requests.get", return_value=mock_resp):
-            url = find_file(2024, 1, "h08v07")
-        assert url is not None
-        assert "2024" in url or "1" in url or "h08v07" in url
+    def test_acepta_la_raiz_como_lista(self, sample_listado_json):
+        with patch("ntl.core.downloader.requests.get",
+                   return_value=self._resp(200, sample_listado_json["content"])):
+            assert find_file(2024, 1, "h09v07").endswith("h09v07.002.2024003022532.h5")
+
+    def test_no_pide_nada_si_la_fecha_esta_fuera_de_vigencia(self):
+        with patch("ntl.core.downloader.requests.get") as get:
+            assert find_file(2026, 307, "h08v07", "VNP46A2") is None
+        get.assert_not_called()
 
 
 class TestDownloadFile:

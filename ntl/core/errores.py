@@ -24,3 +24,15 @@ class MedicionImposible(Exception):
         self.fecha = fecha
         contexto = " en ".join(str(x) for x in (municipio, fecha) if x is not None)
         super().__init__(f"{motivo}" + (f" ({contexto})" if contexto else ""))
+
+
+class CredencialesInvalidas(Exception):
+    """
+    LAADS rechazó el token: no tiene sentido reintentar ni seguir con el lote.
+
+    Se levanta ante un 401/403 o ante una página HTML de login con código 200
+    donde debía venir el HDF5. Es distinta de «el gránulo no existe» (que se
+    señala con None): si el token está mal, todas las demás descargas van a
+    fallar igual, y registrarlo como un fallo más por fecha convertiría una
+    corrida entera en miles de huecos con la misma causa.
+    """

@@ -52,6 +52,7 @@ class TestMedicionResultado:
     def test_valid_medicion_resultado(self):
         data = {
             "Fecha": date(2024, 1, 1),
+            "Producto": "VJ146A2",
             "Cantidad_de_pixeles": 100,
             "Suma_de_radianza": 500.0,
             "Media_de_radianza": 5.0,
@@ -71,6 +72,7 @@ class TestMedicionResultado:
     def test_dict_export(self):
         data = {
             "Fecha": date(2024, 1, 15),
+            "Producto": "VNP46A2",
             "Cantidad_de_pixeles": 50,
             "Suma_de_radianza": 250.0,
             "Media_de_radianza": 5.0,
@@ -86,6 +88,19 @@ class TestMedicionResultado:
         assert "Fecha" in d
         assert "Media_de_radianza" in d
         assert d["Cantidad_de_pixeles"] == 50
+
+    def test_producto_es_obligatorio_y_solo_admite_los_soportados(self):
+        base = dict(
+            Fecha=date(2024, 1, 1), Cantidad_de_pixeles=1, Suma_de_radianza=1.0,
+            Media_de_radianza=1.0, Desviacion_estandar_de_radianza=0.0,
+            Maximo_de_radianza=1.0, Minimo_de_radianza=1.0,
+            Percentil_25_de_radianza=1.0, Percentil_50_de_radianza=1.0,
+            Percentil_75_de_radianza=1.0)
+        with pytest.raises(ValidationError):
+            MedicionResultado(**base)
+        with pytest.raises(ValidationError):
+            MedicionResultado(Producto="VNP46A1", **base)
+        assert MedicionResultado(Producto="VJ146A2", **base).Producto == "VJ146A2"
 
     def test_missing_required_field_raises(self):
         with pytest.raises(ValidationError):

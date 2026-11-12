@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ntl"
 version = "0.10.0"
-description = "VNP46A2 satellite nighttime radiance processing"
+description = "Black Marble (VNP46A2 / VJ146A2) satellite nighttime radiance processing"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.1.0",
@@ -13,7 +13,6 @@ dependencies = [
     "aiohttp>=3.9",
     "h5py>=3.10",
     "pydantic>=2.0",
-    "beautifulsoup4>=4.10",
     "python-dotenv>=1.0",
     # requests: descarga bloqueante en core.downloader
     "requests>=2.26",

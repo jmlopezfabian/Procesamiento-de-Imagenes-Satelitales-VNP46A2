@@ -141,7 +141,7 @@ class TestDescargaDeVariosCuadrantes:
              patch("ntl.core.config.TEMP_DIR", tmp_path), \
              patch("ntl.radianza.lotes.temp_path", side_effect=lambda n: tmp_path / n), \
              patch("ntl.radianza.lotes.find_file_async",
-                   new_callable=AsyncMock, side_effect=lambda s, y, d, c: f"http://x/{c}.h5"), \
+                   new_callable=AsyncMock, side_effect=lambda s, y, d, c, p=None: f"http://x/{c}.h5"), \
              patch("ntl.radianza.lotes.download_file_async", side_effect=descarga), \
              patch("ntl.radianza.lotes.process_image_mosaico", side_effect=procesar):
             await sat.get_measures_for_date(None, "01-01-24")
@@ -236,7 +236,8 @@ class TestLimiteDeFechasConcurrentes:
 
         async def descarga(session, url, save_path):
             open(save_path, "w").write("h5")
-            pico["h5"] = max(pico["h5"], len(list(tmp_path.glob("*.h5"))))
+            # rglob: la corrida baja a su propio subdirectorio run_<uuid>.
+            pico["h5"] = max(pico["h5"], len(list(tmp_path.rglob("*.h5"))))
             await asyncio.sleep(0)
             return save_path
 
@@ -244,7 +245,7 @@ class TestLimiteDeFechasConcurrentes:
              patch("ntl.core.config.TEMP_DIR", tmp_path), \
              patch("ntl.radianza.lotes.temp_path", side_effect=lambda n: tmp_path / n), \
              patch("ntl.radianza.lotes.find_file_async",
-                   new_callable=AsyncMock, side_effect=lambda s, y, d, c: f"http://x/{c}.h5"), \
+                   new_callable=AsyncMock, side_effect=lambda s, y, d, c, p=None: f"http://x/{c}.h5"), \
              patch("ntl.radianza.lotes.download_file_async", side_effect=descarga), \
              patch("ntl.radianza.lotes.process_image_mosaico", return_value=None), \
              patch("ntl.radianza.lotes.cleanup_temp_files"):
@@ -252,7 +253,7 @@ class TestLimiteDeFechasConcurrentes:
 
         # 2 fechas en vuelo x 2 cuadrantes cada una.
         assert pico["h5"] <= 4, f"llegó a haber {pico['h5']} gránulos en disco"
-        assert list(tmp_path.glob("*.h5")) == [], "quedaron archivos sin borrar"
+        assert list(tmp_path.rglob("*.h5")) == [], "quedaron archivos sin borrar"
 
     async def test_los_resultados_no_dependen_del_limite(self, mock_coord_data):
         """Acotar el disco no puede cambiar los datos."""
@@ -403,7 +404,7 @@ class TestUnFalloNoDesapareceEnSilencio:
              patch("ntl.core.config.TEMP_DIR", tmp_path), \
              patch("ntl.radianza.lotes.temp_path", side_effect=lambda n: tmp_path / n), \
              patch("ntl.radianza.lotes.find_file_async",
-                   new_callable=AsyncMock, side_effect=lambda s, y, d, c: f"http://x/{c}.h5"), \
+                   new_callable=AsyncMock, side_effect=lambda s, y, d, c, p=None: f"http://x/{c}.h5"), \
              patch("ntl.radianza.lotes.download_file_async", side_effect=descarga), \
              patch("ntl.radianza.lotes.process_image_mosaico",
                    side_effect=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))):
