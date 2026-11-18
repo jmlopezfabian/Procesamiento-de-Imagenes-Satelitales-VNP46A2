@@ -53,8 +53,9 @@ _REINTENTABLES = (408, 425, 429)
 _TIMEOUT = (15, 20)
 # Las esperas entre reintentos ocurren dentro de una lectura de h5py, es decir,
 # con su candado tomado: mientras se duerme, nada más de h5py avanza en el
-# proceso. Se acortan aquí; la espera completa que pida el servidor
-# (Retry-After) se pasa al limitador global para que frene a todos.
+# proceso. Por eso el backoff propio se acota aquí. Un Retry-After del servidor
+# se respeta entero (hasta BACKOFF_TOPE) y además se pasa al limitador global
+# para que frene a todos.
 _TOPE_ESPERA_EN_HILO = 10.0
 
 
@@ -245,7 +246,11 @@ class _ArchivoRemoto(io.RawIOBase):
                       else random.uniform(0, min(self._tope, self._base * 2 ** (n - 1))))
             if penalizar and self._penalizar is not None:
                 self._penalizar(espera)
-            espera = min(espera, _TOPE_ESPERA_EN_HILO)
+            if espera_pedida is None:
+                # El backoff propio sí se acota: es una conjetura nuestra.
+                # Un Retry-After no: el servidor dijo cuánto, y reintentar antes
+                # solo gasta intentos contra un 429 seguro.
+                espera = min(espera, _TOPE_ESPERA_EN_HILO)
             print(f"Rango {a}-{b}: {motivo} (intento {n}/{self._max_intentos}); "
                   f"reintentando en {espera:.1f} s")
             # `wait` en vez de sleep: una cancelación corta la espera.

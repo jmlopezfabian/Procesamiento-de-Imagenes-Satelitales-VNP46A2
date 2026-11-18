@@ -163,7 +163,7 @@ DESCARGA_PARCIAL = _valor_parcial in _VERDADEROS
 # Tamaño del bloque que se pide por rango (KiB). Más chico = menos bytes de más
 # y más peticiones; 64 KiB da ~20 peticiones y ~5 MB por cuadrante de México.
 _valor_bloque = (_primera_definida("NTL_BLOQUE_RANGO_KIB") or "64").strip()
-if not _valor_bloque.isdigit() or int(_valor_bloque) < 4:
+if not (_valor_bloque.isascii() and _valor_bloque.isdigit()) or int(_valor_bloque) < 4:
     raise ValueError(
         f"NTL_BLOQUE_RANGO_KIB={_valor_bloque!r} no es válido: usa un entero de 4 o más (KiB)")
 BLOQUE_RANGO = int(_valor_bloque) * 1024

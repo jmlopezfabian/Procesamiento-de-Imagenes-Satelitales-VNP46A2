@@ -320,6 +320,10 @@ _LECTURAS_LOCK = threading.Lock()
 # no se guarda al terminar: si no, un hilo que seguía leyendo cuando la fecha se
 # abortó reinsertaba ~140 MB de un archivo ya borrado.
 _OLVIDOS: dict[str, int] = {}
+# Lecturas en curso por ruta: `_OLVIDOS` solo hace falta mientras hay alguna,
+# y se limpia cuando termina la última (si no, crecería una entrada por archivo
+# en un proceso largo).
+_EN_VUELO: dict[str, int] = {}
 # Dos cuadrantes por fecha en vuelo, que es lo que usan las regiones actuales
 # (CDMX y Oaxaca en h08v07, Monterrey en h07v06). Una región de más cuadrantes
 # por fecha excede el tope y vuelve a descomprimir: no da un resultado distinto,
@@ -358,13 +362,22 @@ def leer_cuadrante_compartido(ruta: str, cuadrante: str | None):
             _LECTURAS.move_to_end(clave)
             return _LECTURAS[clave]
         olvidos = _OLVIDOS.get(ident[0], 0)
-    leido = _solo_lectura(_leer_cuadrante(ruta, cuadrante))
+        _EN_VUELO[ident[0]] = _EN_VUELO.get(ident[0], 0) + 1
+    try:
+        leido = _solo_lectura(_leer_cuadrante(ruta, cuadrante))
+    finally:
+        with _LECTURAS_LOCK:
+            olvidado = _OLVIDOS.get(ident[0], 0) != olvidos
+            _EN_VUELO[ident[0]] -= 1
+            if not _EN_VUELO[ident[0]]:
+                del _EN_VUELO[ident[0]]
+                _OLVIDOS.pop(ident[0], None)
     if leido is None:
         # Un fallo no se memoriza: puede ser pasajero (EMFILE, EIO) y el
         # siguiente municipio debe poder reintentar, como antes de la memoria.
         return None
     with _LECTURAS_LOCK:
-        if _OLVIDOS.get(ident[0], 0) != olvidos:
+        if olvidado:
             return leido  # el archivo se olvidó mientras se leía: no se guarda
         _LECTURAS[clave] = leido
         _LECTURAS.move_to_end(clave)
@@ -379,7 +392,8 @@ def olvidar_lectura(ruta: str | None) -> None:
         return
     absoluta = os.path.abspath(ruta)
     with _LECTURAS_LOCK:
-        _OLVIDOS[absoluta] = _OLVIDOS.get(absoluta, 0) + 1
+        if absoluta in _EN_VUELO:
+            _OLVIDOS[absoluta] = _OLVIDOS.get(absoluta, 0) + 1
         for clave in [k for k in _LECTURAS if k[0][0] == absoluta]:
             del _LECTURAS[clave]
 

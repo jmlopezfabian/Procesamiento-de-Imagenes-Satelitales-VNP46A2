@@ -196,3 +196,11 @@ def test_olvidar_durante_una_lectura_no_deja_la_entrada(tmp_path):
         seguir.set()
         hilo.join(5)
     assert len(extraccion._LECTURAS) == 0
+    # Y la contabilidad de olvidos no se queda con nada al terminar.
+    assert extraccion._OLVIDOS == {} and extraccion._EN_VUELO == {}
+
+
+def test_olvidar_sin_lecturas_en_curso_no_acumula(tmp_path):
+    for i in range(5):
+        olvidar_lectura(str(tmp_path / f"{i}.h5"))
+    assert extraccion._OLVIDOS == {}

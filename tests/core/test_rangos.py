@@ -59,8 +59,18 @@ class _Servidor:
         servidor = self
 
         class Handler(BaseHTTPRequestHandler):
+            # Una petición por conexión, dicho explícitamente: sin esto, un
+            # cliente que reusaba la conexión podía quedarse esperando una
+            # respuesta que el servidor nunca iba a mandar (timeout de 20 s,
+            # intermitente según el orden de las pruebas).
+            protocol_version = "HTTP/1.0"
+
             def log_message(self, *a):
                 pass
+
+            def end_headers(self):
+                self.send_header("Connection", "close")
+                super().end_headers()
 
             def do_GET(self):
                 servidor.peticiones += 1
@@ -458,3 +468,59 @@ def test_mosaico_de_varios_cuadrantes_da_lo_mismo(tmp_path, servidor):
                                      delete_files=False).model_dump(mode="json")
 
     assert procesar(delgados) == procesar(completos)
+
+
+def test_un_retry_after_largo_se_respeta_entero(tmp_path, servidor, monkeypatch):
+    """
+    El tope de espera dentro del hilo es para el backoff propio. Un Retry-After
+    se cumple entero: reintentar antes solo gasta intentos contra otro 429.
+    """
+    import ntl.core.rangos as rangos
+
+    monkeypatch.setattr(rangos, "_TOPE_ESPERA_EN_HILO", 0.05)
+    monkeypatch.setattr(config, "BACKOFF_TOPE", 5)
+    servidor.contenido = open(_troceado(tmp_path), "rb").read()
+    servidor.guion = [429]
+    servidor.retry_after = 1
+    inicio = time.monotonic()
+    assert bajar_franjas(servidor.url, str(tmp_path / "d.h5"), _filas_para(_municipios()),
+                         bloque=4096)
+    assert time.monotonic() - inicio >= 1.0
+
+
+def test_una_segunda_cancelacion_no_suelta_el_lugar_antes_que_el_hilo(
+        tmp_path, servidor, monkeypatch):
+    """
+    Si llegaba otra cancelación mientras se esperaba al hilo, la espera se
+    cortaba y el lugar de descarga quedaba libre con el hilo todavía bajando.
+    """
+    import ntl.core.rangos as rangos
+
+    servidor.contenido = open(_troceado(tmp_path), "rb").read()
+    servidor.demora = 0.2
+    monkeypatch.setattr(config, "BLOQUE_RANGO", 1024)
+    termino = threading.Event()
+    original = rangos.bajar_franjas
+
+    def vigilada(*a, **k):
+        try:
+            return original(*a, **k)
+        finally:
+            termino.set()
+
+    monkeypatch.setattr(rangos, "bajar_franjas", vigilada)
+
+    async def correr():
+        async with aiohttp.ClientSession() as s:
+            tarea = asyncio.ensure_future(bajar_franjas_async(
+                s, servidor.url, str(tmp_path / "d.h5"), lambda forma: [(0, 120)]))
+            await asyncio.sleep(0.5)
+            tarea.cancel()
+            await asyncio.sleep(0.02)
+            tarea.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tarea
+            # Cuando la tarea termina, el hilo ya terminó.
+            return termino.is_set()
+
+    assert asyncio.run(correr())

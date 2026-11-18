@@ -798,8 +798,12 @@ async def bajar_franjas_async(session, url, path, filas_para):
     cancelado = threading.Event()
 
     def penalizar(segundos):
-        # Llega desde el hilo: el limitador vive en el loop.
-        loop.call_soon_threadsafe(limitador.penalizar, segundos)
+        # Llega desde el hilo: el limitador vive en el loop. Si el loop ya
+        # cerró no hay a quién frenar.
+        try:
+            loop.call_soon_threadsafe(limitador.penalizar, segundos)
+        except RuntimeError:
+            pass
 
     try:
         async with limitador.descarga():
@@ -814,9 +818,17 @@ async def bajar_franjas_async(session, url, path, filas_para):
                 # lugar de descarga, para no pasarse del límite ni dejarle
                 # escribir en un directorio de corrida ya borrado.
                 cancelado.set()
-                await asyncio.wait({hilo})
-                if not hilo.cancelled():
-                    hilo.exception()  # se consume: el que manda es el CancelledError
+                # Hasta que el hilo termine, aunque llegue otra cancelación:
+                # salir antes soltaría el lugar con el hilo todavía bajando.
+                while not hilo.done():
+                    try:
+                        await asyncio.wait({hilo})
+                    except asyncio.CancelledError:
+                        pass
+                if not hilo.cancelled() and hilo.exception() is None:
+                    # Terminó justo antes del aviso y ya renombró: nadie lo va a
+                    # usar ni a borrar (no quedó en el caché del lote).
+                    _borrar(path)
                 raise
     except rangos._NoParcial as e:
         print(f"Descarga parcial no aplica a {url} ({e}); se baja el archivo entero")
