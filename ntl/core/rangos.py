@@ -382,8 +382,10 @@ def bajar_franjas(url: str, path: str,
             # la corrida puede no existir, y nadie borraría este archivo.
             raise _Cancelado(url)
         os.replace(parcial, path)
+        # El inodo identifica ESTE archivo: si después aparece otro en la misma
+        # ruta, quien limpie tras una cancelación no debe borrarlo.
         return {"peticiones": remoto.peticiones, "bytes": remoto.bytes_recibidos,
-                "tamano": remoto.tamano, "filas": filas}
+                "tamano": remoto.tamano, "filas": filas, "inodo": os.stat(path).st_ino}
     except _NoExiste:
         return None
     finally:

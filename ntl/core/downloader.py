@@ -825,10 +825,15 @@ async def bajar_franjas_async(session, url, path, filas_para):
                         await asyncio.wait({hilo})
                     except asyncio.CancelledError:
                         pass
-                if not hilo.cancelled() and hilo.exception() is None:
+                if not hilo.cancelled() and hilo.exception() is None and hilo.result():
                     # Terminó justo antes del aviso y ya renombró: nadie lo va a
-                    # usar ni a borrar (no quedó en el caché del lote).
-                    _borrar(path)
+                    # usar ni a borrar (no quedó en el caché del lote). Solo si
+                    # sigue siendo el suyo: otra descarga pudo dejar otro ahí.
+                    try:
+                        if os.stat(path).st_ino == hilo.result()["inodo"]:
+                            _borrar(path)
+                    except OSError:
+                        pass
                 raise
     except rangos._NoParcial as e:
         print(f"Descarga parcial no aplica a {url} ({e}); se baja el archivo entero")
