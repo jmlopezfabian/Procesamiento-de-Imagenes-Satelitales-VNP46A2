@@ -85,7 +85,7 @@ class SatelliteImagesAsync:
         
         Args:
             municipios: Lista de nombres de municipios o string único
-            producto: nombre o `Producto` de Black Marble (VNP46A2, VJ146A2).
+            producto: nombre o `Producto` de Black Marble (VNP46A2, VJ146A2, VJ246A2).
                 None = el por omisión (NTL_PRODUCTO, o VJ146A2). Se valida aquí.
                 Una instancia usa un solo producto: nunca se mezclan ni se
                 elige uno por fecha (ver core.productos).
@@ -130,7 +130,14 @@ class SatelliteImagesAsync:
             print(f"❌ No se encontró archivo H5 para: {year}-{day} ({cuadrante})")
             return None
 
-        save_path = self._ruta_temp(f"{date_obj}_{self.producto.nombre}_{cuadrante}.h5")
+        nombre = f"{date_obj}_{self.producto.nombre}_{cuadrante}.h5"
+        if config.DESCARGA_PARCIAL and self._dir_temp is None:
+            # Sin directorio propio de corrida la ruta es compartida entre
+            # instancias y procesos. Con el archivo completo daba igual (es el
+            # mismo contenido), pero el delgado solo trae las filas de ESTOS
+            # municipios: otra instancia que lo pisara dejaría a los suyos sin datos.
+            nombre = f"{date_obj}_{self.producto.nombre}_{cuadrante}_{uuid.uuid4().hex[:12]}.h5"
+        save_path = self._ruta_temp(nombre)
         print(f"📥 Descargando: {h5_url} -> {save_path}")
         if config.DESCARGA_PARCIAL:
             # Solo las filas que usan los municipios de esta instancia (ver

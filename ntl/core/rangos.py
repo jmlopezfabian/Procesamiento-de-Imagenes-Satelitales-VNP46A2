@@ -31,7 +31,7 @@ from __future__ import annotations
 import io
 import os
 import random
-import time
+import threading
 import uuid
 from typing import Callable, Iterable
 from urllib.parse import urljoin
@@ -51,6 +51,11 @@ _REINTENTABLES = (408, 425, 429)
 # lee bajo un candado global. Con LAADS lento, un timeout de 60 s dejaba
 # procesos enteros quietos; mejor cortar y reintentar.
 _TIMEOUT = (15, 20)
+# Las esperas entre reintentos ocurren dentro de una lectura de h5py, es decir,
+# con su candado tomado: mientras se duerme, nada más de h5py avanza en el
+# proceso. Se acortan aquí; la espera completa que pida el servidor
+# (Retry-After) se pasa al limitador global para que frene a todos.
+_TOPE_ESPERA_EN_HILO = 10.0
 
 
 class _NoParcial(Exception):
@@ -59,6 +64,14 @@ class _NoParcial(Exception):
 
 class _NoExiste(Exception):
     """El gránulo ya no está en el servidor (404/410)."""
+
+
+class _Cancelado(Exception):
+    """Quien pidió la descarga la canceló: no se pide nada más ni se deja archivo."""
+
+
+class _RangoEquivocado(requests.RequestException):
+    """El 206 no trae el rango pedido (inicio o largo distinto): se reintenta."""
 
 
 class _ArchivoRemoto(io.RawIOBase):
@@ -71,8 +84,12 @@ class _ArchivoRemoto(io.RawIOBase):
     """
 
     def __init__(self, url: str, sesion: requests.Session, bloque: int,
-                 max_intentos: int, base: float, tope: float):
+                 max_intentos: int, base: float, tope: float,
+                 cancelado: threading.Event | None = None,
+                 penalizar: Callable[[float], None] | None = None):
         super().__init__()
+        self._cancelado = cancelado or threading.Event()
+        self._penalizar = penalizar
         self.url = url
         self._sesion = sesion
         self._bloque = bloque
@@ -155,7 +172,10 @@ class _ArchivoRemoto(io.RawIOBase):
 
         rechazos_seguidos = 0
         for n in range(1, self._max_intentos + 1):
+            if self._cancelado.is_set():
+                raise _Cancelado(self.url)
             espera_pedida = None
+            penalizar = False
             try:
                 actual = self.url
                 for _ in range(10):
@@ -171,12 +191,17 @@ class _ArchivoRemoto(io.RawIOBase):
                 if status == 206:
                     cuerpo = resp.content
                     esperado = b - a + 1
-                    total = _total_de_content_range(resp.headers.get("Content-Range"))
+                    inicio, total = _content_range(resp.headers.get("Content-Range"))
+                    if inicio is not None and inicio != a:
+                        # Un proxy o caché que desplace el rango corrompería la
+                        # lectura en silencio: los bytes irían a otra posición.
+                        raise _RangoEquivocado(
+                            f"se pidió el byte {a} y llegó desde el {inicio}")
                     if total is not None:
                         self.tamano = total
                         esperado = min(b, total - 1) - a + 1
                     if len(cuerpo) != esperado:
-                        raise requests.ConnectionError(
+                        raise _RangoEquivocado(
                             f"rango incompleto: {len(cuerpo)} de {esperado} bytes")
                     self.bytes_recibidos += len(cuerpo)
                     return cuerpo
@@ -200,9 +225,15 @@ class _ArchivoRemoto(io.RawIOBase):
                     rechazos_seguidos = 0
                     motivo = f"HTTP {status}"
                     espera_pedida = _espera_retry_after(resp.headers.get("Retry-After"))
+                    # 429/503: el servidor dice «vas muy rápido». Igual que en la
+                    # descarga completa, hay que frenar a todos, no solo a este hilo.
+                    penalizar = status in (429, 503)
                 else:
                     raise DescargaFallida(f"Rango {a}-{b} de {self.url}: HTTP {status}")
-            except (requests.ConnectionError, requests.Timeout) as e:
+            except requests.RequestException as e:
+                # Toda falla de red es transitoria aquí, incluido un cuerpo
+                # cortado a media respuesta (ChunkedEncodingError), que no es
+                # ConnectionError y antes escapaba sin reintentarse.
                 rechazos_seguidos = 0
                 motivo = f"{type(e).__name__}: {e}"
 
@@ -212,18 +243,32 @@ class _ArchivoRemoto(io.RawIOBase):
                     f"{self._max_intentos} intentos")
             espera = (min(espera_pedida, self._tope) if espera_pedida is not None
                       else random.uniform(0, min(self._tope, self._base * 2 ** (n - 1))))
+            if penalizar and self._penalizar is not None:
+                self._penalizar(espera)
+            espera = min(espera, _TOPE_ESPERA_EN_HILO)
             print(f"Rango {a}-{b}: {motivo} (intento {n}/{self._max_intentos}); "
                   f"reintentando en {espera:.1f} s")
-            time.sleep(espera)
+            # `wait` en vez de sleep: una cancelación corta la espera.
+            if self._cancelado.wait(espera):
+                raise _Cancelado(self.url)
         raise AssertionError("inalcanzable")
 
 
-def _total_de_content_range(valor: str | None) -> int | None:
-    """`bytes 0-65535/19343964` → 19343964."""
-    if not valor or "/" not in valor:
-        return None
-    total = valor.rsplit("/", 1)[1].strip()
-    return int(total) if total.isdigit() else None
+def _content_range(valor: str | None) -> tuple[int | None, int | None]:
+    """`bytes 0-65535/19343964` → (0, 19343964). None en lo que no venga."""
+    if not valor:
+        return None, None
+    inicio = total = None
+    cuerpo = valor.strip()
+    if cuerpo.lower().startswith("bytes"):
+        cuerpo = cuerpo[5:].strip()
+    rango, _, tot = cuerpo.partition("/")
+    a = rango.split("-", 1)[0].strip()
+    if a.isdigit():
+        inicio = int(a)
+    if tot.strip().isdigit():
+        total = int(tot.strip())
+    return inicio, total
 
 
 def unir_intervalos(intervalos: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -292,7 +337,9 @@ def escribir_delgado(origen: h5py.File, destino: str,
 
 def bajar_franjas(url: str, path: str,
                   filas_para: Callable[[tuple[int, int]], list[tuple[int, int]]],
-                  bloque: int | None = None) -> dict | None:
+                  bloque: int | None = None,
+                  cancelado: threading.Event | None = None,
+                  penalizar: Callable[[float], None] | None = None) -> dict | None:
     """
     Baja de `url` solo las filas que pide `filas_para(forma)` y deja en `path`
     un HDF5 delgado (ver módulo). Bloqueante: el lote la corre en un hilo.
@@ -301,7 +348,12 @@ def bajar_franjas(url: str, path: str,
     gránulo no existe. Lanza `_NoParcial` si hay que bajarlo entero,
     `CredencialesInvalidas` y `DescargaFallida` como la descarga completa.
     Como ésta, escribe a un `.part` y solo renombra un archivo terminado.
+
+    `cancelado`: si se activa, no se hace ninguna petición más, se corta la
+    espera en curso y no queda archivo (lanza `_Cancelado`). `penalizar(s)`
+    recibe la espera que pidió el servidor ante un 429/503.
     """
+    cancelado = cancelado or threading.Event()
     bloque = bloque or config.BLOQUE_RANGO
     parcial = f"{path}.{os.getpid()}.{uuid.uuid4().hex}.part"
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -309,7 +361,8 @@ def bajar_franjas(url: str, path: str,
         with requests.Session() as sesion:
             try:
                 remoto = _ArchivoRemoto(url, sesion, bloque, config.MAX_INTENTOS,
-                                        config.BACKOFF_BASE, config.BACKOFF_TOPE)
+                                        config.BACKOFF_BASE, config.BACKOFF_TOPE,
+                                        cancelado=cancelado, penalizar=penalizar)
             except _NoExiste:
                 return None
             try:
@@ -319,6 +372,10 @@ def bajar_franjas(url: str, path: str,
                 if remoto.error is not None:
                     raise remoto.error from None
                 raise
+        if cancelado.is_set():
+            # Ya terminó de bajar, pero quien lo pidió se fue: el directorio de
+            # la corrida puede no existir, y nadie borraría este archivo.
+            raise _Cancelado(url)
         os.replace(parcial, path)
         return {"peticiones": remoto.peticiones, "bytes": remoto.bytes_recibidos,
                 "tamano": remoto.tamano, "filas": filas}

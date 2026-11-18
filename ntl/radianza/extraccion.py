@@ -316,6 +316,15 @@ def _crop_capa(capas, pesos_ref, desplazamientos, forma):
 
 _LECTURAS: "OrderedDict[tuple, Any]" = OrderedDict()
 _LECTURAS_LOCK = threading.Lock()
+# Cuántas veces se olvidó cada ruta. Una lectura que empezó antes de un olvido
+# no se guarda al terminar: si no, un hilo que seguía leyendo cuando la fecha se
+# abortó reinsertaba ~140 MB de un archivo ya borrado.
+_OLVIDOS: dict[str, int] = {}
+# Dos cuadrantes por fecha en vuelo, que es lo que usan las regiones actuales
+# (CDMX y Oaxaca en h08v07, Monterrey en h07v06). Una región de más cuadrantes
+# por fecha excede el tope y vuelve a descomprimir: no da un resultado distinto,
+# pero pierde la ganancia. Memoria: ~140 MB por entrada, ~1.1 GB con el valor
+# por omisión de MAX_FECHAS_CONCURRENTES (4).
 MAX_LECTURAS_EN_MEMORIA = max(4, 2 * MAX_FECHAS_CONCURRENTES)
 
 
@@ -348,8 +357,15 @@ def leer_cuadrante_compartido(ruta: str, cuadrante: str | None):
         if clave in _LECTURAS:
             _LECTURAS.move_to_end(clave)
             return _LECTURAS[clave]
+        olvidos = _OLVIDOS.get(ident[0], 0)
     leido = _solo_lectura(_leer_cuadrante(ruta, cuadrante))
+    if leido is None:
+        # Un fallo no se memoriza: puede ser pasajero (EMFILE, EIO) y el
+        # siguiente municipio debe poder reintentar, como antes de la memoria.
+        return None
     with _LECTURAS_LOCK:
+        if _OLVIDOS.get(ident[0], 0) != olvidos:
+            return leido  # el archivo se olvidó mientras se leía: no se guarda
         _LECTURAS[clave] = leido
         _LECTURAS.move_to_end(clave)
         while len(_LECTURAS) > MAX_LECTURAS_EN_MEMORIA:
@@ -363,6 +379,7 @@ def olvidar_lectura(ruta: str | None) -> None:
         return
     absoluta = os.path.abspath(ruta)
     with _LECTURAS_LOCK:
+        _OLVIDOS[absoluta] = _OLVIDOS.get(absoluta, 0) + 1
         for clave in [k for k in _LECTURAS if k[0][0] == absoluta]:
             del _LECTURAS[clave]
 

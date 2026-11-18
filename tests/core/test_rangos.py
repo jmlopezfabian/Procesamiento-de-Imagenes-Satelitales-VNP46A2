@@ -9,7 +9,9 @@ real. Se prueba contra un servidor HTTP local que imita a LAADS.
 """
 import asyncio
 import os
+import socket
 import threading
+import time
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -36,11 +38,19 @@ CENTRO = (-95.0, 15.0)  # centro de h08v07 en la retícula sintética
 # --- servidor que imita a LAADS ------------------------------------------------
 
 class _Servidor:
-    """Sirve un archivo con Range. `guion` es la lista de respuestas forzadas
-    para las primeras peticiones (p. ej. [401, 503]); luego responde normal."""
+    """
+    Sirve archivos con Range. `contenido` es el de `/granulo.h5`; `archivos`
+    agrega otros por nombre. `guion` fuerza las respuestas de las primeras
+    peticiones: un entero es ese status, y "truncar" / "desplazar" sirven el
+    rango con el cuerpo cortado a la mitad o empezando en el byte equivocado.
+    `demora` (s) retrasa cada respuesta; `retry_after` va en las forzadas.
+    """
 
     def __init__(self):
         self.contenido = b""
+        self.archivos: dict[str, bytes] = {}
+        self.demora = 0.0
+        self.retry_after = None
         self.acepta_rangos = True
         self.existe = True
         self.guion: list[int] = []
@@ -54,8 +64,13 @@ class _Servidor:
 
             def do_GET(self):
                 servidor.peticiones += 1
-                if servidor.guion:
-                    self.send_response(servidor.guion.pop(0))
+                if servidor.demora:
+                    time.sleep(servidor.demora)
+                forzada = servidor.guion.pop(0) if servidor.guion else None
+                if isinstance(forzada, int):
+                    self.send_response(forzada)
+                    if servidor.retry_after is not None:
+                        self.send_header("Retry-After", str(servidor.retry_after))
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
@@ -64,11 +79,14 @@ class _Servidor:
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
-                datos = servidor.contenido
+                nombre = self.path.lstrip("/")
+                datos = servidor.archivos.get(nombre, servidor.contenido)
                 rango = self.headers.get("Range")
                 if rango and servidor.acepta_rangos:
                     a, b = rango.split("=")[1].split("-")
                     a, b = int(a), min(int(b), len(datos) - 1)
+                    if forzada == "desplazar":
+                        a, b = a + 1, min(b + 1, len(datos) - 1)
                     cuerpo = datos[a:b + 1]
                     self.send_response(206)
                     self.send_header("Content-Range", f"bytes {a}-{b}/{len(datos)}")
@@ -77,11 +95,18 @@ class _Servidor:
                     self.send_response(200)
                 self.send_header("Content-Length", str(len(cuerpo)))
                 self.end_headers()
+                if forzada == "truncar":
+                    # Se anuncia el largo entero y se corta a la mitad.
+                    self.wfile.write(cuerpo[:len(cuerpo) // 2])
+                    self.wfile.flush()
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    return
                 self.wfile.write(cuerpo)
                 servidor.bytes_servidos += len(cuerpo)
 
         self._http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self._http.server_port}/granulo.h5"
+        self.base = f"http://127.0.0.1:{self._http.server_port}"
+        self.url = f"{self.base}/granulo.h5"
         threading.Thread(target=self._http.serve_forever, daemon=True).start()
 
     def cerrar(self):
@@ -269,19 +294,15 @@ def test_un_401_a_media_lectura_llega_como_credenciales_invalidas(tmp_path, serv
     """
     servidor.contenido = open(_troceado(tmp_path), "rb").read()
     destino = str(tmp_path / "d.h5")
-    original = servidor.contenido
 
     # El primer bloque sale bien; a partir de ahí, solo 401.
-    servidor.guion = []
-    llamadas = {"n": 0}
-
     def filas(forma):
         servidor.guion = [401] * 50
         return [(0, 120)]
 
     with pytest.raises(CredencialesInvalidas):
         bajar_franjas(servidor.url, destino, filas, bloque=1024)
-    assert original == servidor.contenido
+    assert not os.path.exists(destino)
 
 
 def test_un_503_se_reintenta(tmp_path, servidor):
@@ -333,3 +354,107 @@ def test_el_lote_usa_la_descarga_parcial_solo_si_esta_activada(monkeypatch, tmp_
         asyncio.run(sat._bajar_h5(None, 2024, "001", CUADRANTE, date(2024, 1, 1), "k"))
 
     assert llamadas == [("completa", None), ("parcial", [(7, 10)])]
+
+
+def test_un_cuerpo_cortado_a_media_respuesta_se_reintenta(tmp_path, servidor):
+    """
+    Un corte a media respuesta no es ConnectionError para requests: es
+    ChunkedEncodingError. Antes escapaba sin reintentarse y perdía la fecha.
+    """
+    completo = _troceado(tmp_path)
+    servidor.contenido = open(completo, "rb").read()
+    servidor.guion = ["truncar"]
+    municipios = _municipios()
+    delgado = str(tmp_path / "d.h5")
+    assert bajar_franjas(servidor.url, delgado, _filas_para(municipios), bloque=1024)
+    assert _procesar(delgado, municipios) == _procesar(completo, municipios)
+
+
+def test_un_rango_desplazado_no_se_acepta(tmp_path, servidor):
+    """Un 206 que empieza en otro byte corrompería la lectura: se reintenta."""
+    completo = _troceado(tmp_path)
+    servidor.contenido = open(completo, "rb").read()
+    servidor.guion = ["desplazar"]
+    municipios = _municipios()
+    delgado = str(tmp_path / "d.h5")
+    assert bajar_franjas(servidor.url, delgado, _filas_para(municipios), bloque=1024)
+    assert _procesar(delgado, municipios) == _procesar(completo, municipios)
+
+
+def test_un_rango_siempre_desplazado_agota_los_intentos(tmp_path, servidor):
+    servidor.contenido = open(_troceado(tmp_path), "rb").read()
+    servidor.guion = ["desplazar"] * 10
+    with pytest.raises(DescargaFallida):
+        bajar_franjas(servidor.url, str(tmp_path / "d.h5"), _filas_para(_municipios()))
+
+
+def test_un_429_frena_al_limitador_de_todos(tmp_path, servidor):
+    servidor.contenido = open(_troceado(tmp_path), "rb").read()
+    servidor.guion = [429]
+    servidor.retry_after = 7
+    pausas = []
+    assert bajar_franjas(servidor.url, str(tmp_path / "d.h5"), _filas_para(_municipios()),
+                         bloque=4096, penalizar=pausas.append)
+    # La espera que pidió el servidor (acotada por el tope de backoff).
+    assert pausas == [pytest.approx(config.BACKOFF_TOPE)]
+
+
+def test_cancelar_detiene_el_hilo_y_no_deja_archivo(tmp_path, servidor, monkeypatch):
+    """
+    `to_thread` no se puede cancelar. Antes, al abortar un lote, el hilo seguía
+    pidiendo rangos sin lugar de descarga y podía escribir en un directorio de
+    corrida ya borrado. Ahora se le avisa y se espera a que suelte.
+    """
+    servidor.contenido = open(_troceado(tmp_path), "rb").read()
+    servidor.demora = 0.05
+    # Bloques chicos: ~70 peticiones, así la descarga sigue en curso al cancelar.
+    monkeypatch.setattr(config, "BLOQUE_RANGO", 1024)
+    destino = str(tmp_path / "d.h5")
+
+    async def correr():
+        async with aiohttp.ClientSession() as s:
+            tarea = asyncio.ensure_future(
+                bajar_franjas_async(s, servidor.url, destino, lambda forma: [(0, 120)]))
+            await asyncio.sleep(0.3)
+            tarea.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tarea
+            antes = servidor.peticiones
+            await asyncio.sleep(0.3)
+            return antes, servidor.peticiones
+
+    antes, despues = asyncio.run(correr())
+    assert 0 < antes < 60  # se canceló a media descarga
+    assert despues == antes  # y el hilo ya no pidió nada más
+    assert not os.path.exists(destino)
+    assert not [p for p in os.listdir(tmp_path) if p.endswith(".part")]
+
+
+def test_mosaico_de_varios_cuadrantes_da_lo_mismo(tmp_path, servidor):
+    """
+    Un municipio repartido entre cuatro cuadrantes: cada uno con sus filas en
+    el marco de referencia. El recorte guardado tiene que salir igual.
+    """
+    from tests.test_multicuadrante import CUATRO, ESQUINA
+
+    piezas = cobertura_por_cuadrante(cuadrado(ESQUINA, 1.3), FORMA)
+    completos, delgados = {}, {}
+    for c in CUATRO:
+        d = tmp_path / c
+        d.mkdir()
+        plano = crear_cuadrante(d, c)
+        servidor.archivos[f"{c}.h5"] = open(plano, "rb").read()
+        completos[c] = plano
+        delgados[c] = str(tmp_path / f"{c}_delgado.h5")
+        bajar_franjas(f"{servidor.base}/{c}.h5", delgados[c],
+                      lambda forma, c=c: filas_necesarias([piezas], c, forma), bloque=1024)
+        with h5py.File(delgados[c], "r") as f:
+            # De verdad es parcial: no se pidieron todas las filas.
+            assert f.attrs[ATRIBUTO_PARCIAL].tolist() != [[0, FORMA[0]]]
+
+    def procesar(rutas):
+        extraccion._LECTURAS.clear()
+        return process_image_mosaico(rutas, piezas, date(2024, 1, 1), "mosaico",
+                                     delete_files=False).model_dump(mode="json")
+
+    assert procesar(delgados) == procesar(completos)

@@ -21,6 +21,7 @@ import contextlib
 import email.utils
 import os
 import random
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -793,10 +794,30 @@ async def bajar_franjas_async(session, url, path, filas_para):
     ignora el Range o la forma no es la esperada— baja el archivo entero.
     """
     limitador = obtener_limitador()
+    loop = asyncio.get_running_loop()
+    cancelado = threading.Event()
+
+    def penalizar(segundos):
+        # Llega desde el hilo: el limitador vive en el loop.
+        loop.call_soon_threadsafe(limitador.penalizar, segundos)
+
     try:
         async with limitador.descarga():
             await limitador.esperar_turno()
-            stats = await asyncio.to_thread(rangos.bajar_franjas, url, path, filas_para)
+            hilo = asyncio.ensure_future(asyncio.to_thread(
+                rangos.bajar_franjas, url, path, filas_para, None, cancelado, penalizar))
+            try:
+                stats = await asyncio.shield(hilo)
+            except asyncio.CancelledError:
+                # Un hilo no se puede cancelar: se le avisa y se espera a que
+                # suelte (a lo sumo un timeout de lectura) antes de liberar el
+                # lugar de descarga, para no pasarse del límite ni dejarle
+                # escribir en un directorio de corrida ya borrado.
+                cancelado.set()
+                await asyncio.wait({hilo})
+                if not hilo.cancelled():
+                    hilo.exception()  # se consume: el que manda es el CancelledError
+                raise
     except rangos._NoParcial as e:
         print(f"Descarga parcial no aplica a {url} ({e}); se baja el archivo entero")
         return await bajar_archivo_async(session, url, path)

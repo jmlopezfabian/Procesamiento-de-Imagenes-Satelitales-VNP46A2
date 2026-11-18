@@ -109,6 +109,9 @@ def temp_path(filename: str) -> Path:
 #
 #     pico ≈ MAX_FECHAS_CONCURRENTES × cuadrantes de la región × ~16 MB (tiles de México; el mayor del día ronda 30 MB)
 #
+# Y de memoria: cada cuadrante en vuelo se guarda descomprimido para compartirlo
+# entre los municipios de la fecha (~140 MB; ver radianza.extraccion).
+#
 # Sin este límite se lanzaba una tarea por fecha y todas descargaban a la vez:
 # un año de una región de dos cuadrantes son 730 gránulos simultáneos. El
 # parámetro `chunks` lo acotaba de rebote, pero existe para guardar progreso, no
@@ -147,11 +150,23 @@ MAX_INTENTOS = max(1, int(_primera_definida("NTL_MAX_INTENTOS") or 5))
 # alcaldías de la CDMX y Oaxaca son ~5 de ~19 MB por cuadrante. Desactivada por
 # omisión; NTL_DESCARGA_PARCIAL=1 la enciende. Si el servidor no acepta rangos,
 # se baja el archivo entero como siempre.
-DESCARGA_PARCIAL = (_primera_definida("NTL_DESCARGA_PARCIAL") or "0").strip().lower() in (
-    "1", "true", "si", "sí", "yes")
+_VERDADEROS = ("1", "true", "si", "sí", "yes", "on")
+_FALSOS = ("0", "false", "no", "off", "")
+_valor_parcial = (_primera_definida("NTL_DESCARGA_PARCIAL") or "0").strip().lower()
+if _valor_parcial not in _VERDADEROS + _FALSOS:
+    # Un valor que no se entiende no puede quedar apagado en silencio: quien
+    # escribió `NTL_DESCARGA_PARCIAL=enabled` bajaría archivos completos sin saberlo.
+    raise ValueError(
+        f"NTL_DESCARGA_PARCIAL={_valor_parcial!r} no es válido: usa 1 o 0 "
+        f"(también true/false, si/no, on/off)")
+DESCARGA_PARCIAL = _valor_parcial in _VERDADEROS
 # Tamaño del bloque que se pide por rango (KiB). Más chico = menos bytes de más
-# y más peticiones; 64 KiB da ~18 peticiones y ~5 MB por cuadrante de México.
-BLOQUE_RANGO = max(4, int(_primera_definida("NTL_BLOQUE_RANGO_KIB") or 64)) * 1024
+# y más peticiones; 64 KiB da ~20 peticiones y ~5 MB por cuadrante de México.
+_valor_bloque = (_primera_definida("NTL_BLOQUE_RANGO_KIB") or "64").strip()
+if not _valor_bloque.isdigit() or int(_valor_bloque) < 4:
+    raise ValueError(
+        f"NTL_BLOQUE_RANGO_KIB={_valor_bloque!r} no es válido: usa un entero de 4 o más (KiB)")
+BLOQUE_RANGO = int(_valor_bloque) * 1024
 BACKOFF_BASE = float(_primera_definida("NTL_BACKOFF_BASE") or 2)
 BACKOFF_TOPE = float(_primera_definida("NTL_BACKOFF_TOPE") or 120)
 # Cuánto se recuerda que el listado de un día respondió 404 (s). Un día aún no

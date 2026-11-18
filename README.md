@@ -120,7 +120,8 @@ queda en `fallos` (tipo `ProductoFueraDeRango`, con el motivo) y en modo `estric
 > 140.7 contra VJ146A2 142.4 nW/(cm² sr); una noche no es calibración). Una sola noche, sobre CDMX: VJ146A2 dio ~16-23% más que VNP46A2 en píxeles
 > de calidad 0, y en el tile completo ~17-27% menos. Es una observación aislada, no una
 > calibración: solo indica que hace falta calibrar en el traslape 2018-2026 antes de
-> empalmar una serie de VNP46A2 con una de VJ146A2. Hasta entonces, no las concatenes.
+> empalmar una serie de VNP46A2 con una de VJ146A2 (o VJ146A2 con VJ246A2, en su traslape
+> desde 2023). Hasta entonces, no concatenes series de productos distintos.
 
 VNP46A1 —radianza cruda al sensor— sigue fuera a propósito: un archivo cuyo `ShortName` no
 sea VNP46A2, VJ146A2 o VJ246A2 se rechaza.
@@ -406,8 +407,8 @@ con archivos completos.
 
 | Variable | Por omisión | Qué hace |
 |---|---|---|
-| `NTL_DESCARGA_PARCIAL` | `0` | `1` activa la descarga parcial |
-| `NTL_BLOQUE_RANGO_KIB` | 64 | Tamaño de cada bloque pedido. Más chico = menos bytes de más y más peticiones (~20 por cuadrante con 64) |
+| `NTL_DESCARGA_PARCIAL` | `0` | `1` activa la descarga parcial (también `true`/`si`/`on`). Un valor no reconocido falla al importar |
+| `NTL_BLOQUE_RANGO_KIB` | 64 | Tamaño de cada bloque pedido. Más chico = menos bytes de más y más peticiones (~20 por cuadrante con 64). Mínimo 4 |
 
 - **Si el servidor ignora el `Range`,** se baja el archivo entero.
 - **Errores de credenciales:** en este modo, un 401 aislado se reintenta y solo dos

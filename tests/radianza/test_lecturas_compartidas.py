@@ -7,6 +7,8 @@ un gránulo real de VNP46A2, mismos resultados byte a byte). Estas pruebas fijan
 que la memoria no cambia el resultado, que nunca sirve una imagen vieja y que se
 suelta cuando el archivo se borra.
 """
+import os
+import threading
 from datetime import date
 from unittest.mock import patch
 
@@ -91,8 +93,11 @@ def test_un_archivo_reemplazado_se_vuelve_a_leer(tmp_path):
     """
     ruta = crear_cuadrante(tmp_path, CUADRANTE)
     antes = leer_cuadrante_compartido(ruta, CUADRANTE)[0].copy()
+    mtime = os.stat(ruta).st_mtime_ns
 
     crear_cuadrante(tmp_path, CUADRANTE, relleno=True)  # mismo nombre, otro contenido
+    # Que no dependa de la resolución de mtime del sistema de archivos.
+    os.utime(ruta, ns=(mtime + 10**9, mtime + 10**9))
     despues = leer_cuadrante_compartido(ruta, CUADRANTE)[0]
 
     assert np.isfinite(antes).all()
@@ -146,4 +151,48 @@ def test_el_lote_suelta_la_lectura_al_borrar_el_cuadrante(tmp_path):
     sat = SatelliteImagesAsync.__new__(SatelliteImagesAsync)
     sat.cache_h5_files, sat._vuelo = {"k": ruta}, {}
     sat._borrar_cuadrante("k", ruta)
+    assert len(extraccion._LECTURAS) == 0
+
+
+def test_una_lectura_fallida_no_se_memoriza(tmp_path):
+    """
+    Un fallo puede ser pasajero (EMFILE, EIO). Si se memorizaba, los demás
+    municipios de la fecha ya no reintentaban y salían sin ese cuadrante.
+    """
+    ruta = crear_cuadrante(tmp_path, CUADRANTE)
+    original = extraccion._leer_cuadrante
+    intentos = []
+
+    def falla_una_vez(r, c):
+        intentos.append(r)
+        return None if len(intentos) == 1 else original(r, c)
+
+    with patch.object(extraccion, "_leer_cuadrante", side_effect=falla_una_vez):
+        assert leer_cuadrante_compartido(ruta, CUADRANTE) is None
+        assert leer_cuadrante_compartido(ruta, CUADRANTE) is not None
+    assert len(intentos) == 2
+
+
+def test_olvidar_durante_una_lectura_no_deja_la_entrada(tmp_path):
+    """
+    Al abortar una fecha, su hilo puede seguir leyendo mientras el lote ya
+    olvidó y borró el archivo. Al terminar no debe guardar la lectura: serían
+    ~140 MB de un archivo que ya no existe.
+    """
+    ruta = crear_cuadrante(tmp_path, CUADRANTE)
+    original = extraccion._leer_cuadrante
+    leyendo, seguir = threading.Event(), threading.Event()
+
+    def lenta(r, c):
+        leyendo.set()
+        seguir.wait(5)
+        return original(r, c)
+
+    with patch.object(extraccion, "_leer_cuadrante", side_effect=lenta):
+        hilo = threading.Thread(target=leer_cuadrante_compartido, args=(ruta, CUADRANTE))
+        hilo.start()
+        leyendo.wait(5)
+        olvidar_lectura(ruta)
+        seguir.set()
+        hilo.join(5)
     assert len(extraccion._LECTURAS) == 0
