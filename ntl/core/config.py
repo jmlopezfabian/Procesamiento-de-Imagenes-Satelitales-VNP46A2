@@ -26,7 +26,7 @@ def _primera_definida(*nombres: str) -> str | None:
 # Producto de Black Marble del que se lee la radianza.
 #
 # Los productos soportados viven en `ntl.core.productos` (VNP46A2 de Suomi NPP,
-# que termina el 2026-11-02, y VJ146A2 de NOAA-20, vigente). Ambos son versiones
+# que termina el 2026-11-02; VJ146A2 de NOAA-20 y VJ246A2 de NOAA-21, vigentes). Todos son versiones
 # corregidas por reflectancia bidireccional lunar y atmósfera, con
 # Mandatory_Quality_Flag por píxel. Por omisión se usa VJ146A2; NTL_PRODUCTO lo
 # cambia. `PRODUCTO` se conserva por compatibilidad como el NOMBRE del producto

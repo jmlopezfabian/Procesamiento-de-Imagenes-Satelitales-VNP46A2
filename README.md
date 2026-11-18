@@ -1,7 +1,7 @@
 ## Procesamiento de Imágenes Satelitales Black Marble
 
 Proyecto para procesar imágenes satelitales de luminosidad nocturna de Black Marble (NASA):
-**VJ146A2** (NOAA-20, por omisión) o **VNP46A2** (Suomi NPP, hasta el 2026-11-02) y obtener métricas de radianza por municipio.
+**VJ146A2** (NOAA-20, por omisión), **VJ246A2** (NOAA-21) o **VNP46A2** (Suomi NPP, hasta el 2026-11-02) y obtener métricas de radianza por municipio.
 
 Es una **librería**: el tablero y el servicio que la usan a diario viven en
 daily-ntl. Ver "Dónde vive la aplicación".
@@ -100,11 +100,12 @@ Se leen productos diarios de Black Marble corregidos por BRDF lunar y atmósfera
 | Producto | Satélite | Cobertura | |
 |---|---|---|---|
 | `VNP46A2` | Suomi NPP | 2012-01-19 a **2026-11-02** (día 2026-306) | Suomi NPP dejó de entregar datos el 2 de noviembre de 2026 |
-| `VJ146A2` | NOAA-20 (JPSS-1) | desde 2018-01-05, vigente | **Por omisión**: el único que sigue publicando |
+| `VJ146A2` | NOAA-20 (JPSS-1) | desde 2018-01-05, vigente | **Por omisión**: la serie vigente más larga. Se publica ~14 días después |
+| `VJ246A2` | NOAA-21 (JPSS-2) | desde 2023-02-10, vigente | Se publica antes (~8 días) y cubre huecos de los otros dos |
 
-Ambos son colección 5200 y comparten algoritmo, retícula y formato HDF5. El producto de
+Los tres son colección 5200 y comparten algoritmo, retícula y formato HDF5. El producto de
 cada registro sale del atributo raíz `ShortName` del archivo, y `Producto` lo lleva
-(`"VNP46A2"` o `"VJ146A2"`). Para elegir otro:
+(`"VNP46A2"`, `"VJ146A2"` o `"VJ246A2"`). Para elegir otro:
 
 - `NTL_PRODUCTO=VNP46A2` en el entorno (o `.env`) cambia el valor por omisión;
 - `SatelliteImagesAsync(municipios, producto="VNP46A2")` y
@@ -114,14 +115,15 @@ Una fecha fuera de la vigencia del producto no se pide a NASA: en `SatelliteImag
 queda en `fallos` (tipo `ProductoFueraDeRango`, con el motivo) y en modo `estricto` lanza
 `ValueError`. La librería nunca elige el producto según la fecha por su cuenta.
 
-> **Advertencia de calibración.** Los dos productos **no son intercambiables sin
-> calibrar**. Una sola noche, sobre CDMX: VJ146A2 dio ~16-23% más que VNP46A2 en píxeles
+> **Advertencia de calibración.** Los productos **no son intercambiables sin
+> calibrar**, tampoco los dos NOAA entre sí (2026-10-20, Cuauhtémoc despejado: VJ246A2
+> 140.7 contra VJ146A2 142.4 nW/(cm² sr); una noche no es calibración). Una sola noche, sobre CDMX: VJ146A2 dio ~16-23% más que VNP46A2 en píxeles
 > de calidad 0, y en el tile completo ~17-27% menos. Es una observación aislada, no una
 > calibración: solo indica que hace falta calibrar en el traslape 2018-2026 antes de
 > empalmar una serie de VNP46A2 con una de VJ146A2. Hasta entonces, no las concatenes.
 
 VNP46A1 —radianza cruda al sensor— sigue fuera a propósito: un archivo cuyo `ShortName` no
-sea VNP46A2 o VJ146A2 se rechaza.
+sea VNP46A2, VJ146A2 o VJ246A2 se rechaza.
 
 VNP46A1 no trae ninguna bandera que
 permita descartar una observación inservible: una noche completamente nublada produce un

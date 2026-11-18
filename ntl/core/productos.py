@@ -1,15 +1,20 @@
 """
 Productos de Black Marble diarios que la librería sabe leer.
 
-VNP46A2 (Suomi NPP) y VJ146A2 (NOAA-20 / JPSS-1) comparten algoritmo, retícula,
-colección (5200) y formato HDF5: las mismas capas, dtypes, `_FillValue` y
-`scale_factor`. Suomi NPP dejó de entregar datos el 2026-11-02, así que
-VNP46A2 termina en el día 2026-306 y su sucesor vigente es VJ146A2.
+VNP46A2 (Suomi NPP), VJ146A2 (NOAA-20 / JPSS-1) y VJ246A2 (NOAA-21 / JPSS-2)
+comparten algoritmo, retícula, colección (5200) y formato HDF5: las mismas
+capas, dtypes, `_FillValue` y `scale_factor`. Suomi NPP dejó de entregar datos
+el 2026-11-02, así que VNP46A2 termina en el día 2026-306. VJ146A2 es el por
+omisión; VJ246A2 (desde 2023-02-10) es un tercer sensor vigente que se publica
+antes (~8 días contra ~14 de VJ146A2, medido en noviembre de 2026) y cubre
+huecos de los otros dos.
 
 NO son intercambiables sin calibrar. Medido una sola noche: sobre CDMX, VJ1 dio
 ~16-23% más que VNP en píxeles de calidad 0, y en el tile completo ~17-27%
 menos. Es una noche, no una calibración: solo indica que hace falta calibrar en
-el traslape 2018-2026 antes de empalmar series. Por eso cada registro lleva su
+el traslape 2018-2026 antes de empalmar series. Lo mismo vale para VJ246A2: es
+otro instrumento y no se empalma con VJ146A2 sin calibrar en su traslape
+(2023 en adelante). Por eso cada registro lleva su
 `Producto` (el que declara el archivo) y la librería nunca mezcla productos ni
 elige uno por fecha a escondidas: el que pide quien llama es el que se usa, y
 si la fecha cae fuera de su vigencia se dice en vez de pedirlo a NASA.
@@ -62,9 +67,15 @@ PRODUCTOS: dict[str, Producto] = {
         inicio=date(2018, 1, 5), fin=None,
         descripcion="Black Marble diario corregido por BRDF lunar y atmósfera, VIIRS/NOAA-20",
     ),
+    "VJ246A2": Producto(
+        nombre="VJ246A2", satelite="NOAA-21", plataforma="JPSS-2",
+        inicio=date(2023, 2, 10), fin=None,
+        descripcion="Black Marble diario corregido por BRDF lunar y atmósfera, VIIRS/NOAA-21",
+    ),
 }
 
-# El único vigente: el de Suomi NPP ya no recibe datos nuevos.
+# El de serie más larga entre los vigentes (desde 2018); Suomi NPP ya no recibe
+# datos nuevos. VJ246A2 se elige con NTL_PRODUCTO=VJ246A2.
 PRODUCTO_POR_OMISION = "VJ146A2"
 
 

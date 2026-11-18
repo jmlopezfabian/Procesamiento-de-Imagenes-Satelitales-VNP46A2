@@ -591,6 +591,18 @@ class TestNoHayMedicionVsNoSePuedeMedir:
             process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
                                   delete_files=False)
 
+    def test_los_dos_sensores_noaa_tampoco_se_mezclan_en_un_mosaico(self, tmp_path):
+        coords = cuadrado(ESQUINA, 1.3)
+        piezas = cobertura_por_cuadrante(coords, FORMA)
+        rutas = {c: crear_cuadrante(tmp_path, c, producto="VJ246A2") for c in piezas}
+        otro = tmp_path / "otro"
+        otro.mkdir()
+        ultimo = list(piezas)[-1]
+        rutas[ultimo] = crear_cuadrante(otro, ultimo, producto="VJ146A2")
+        with pytest.raises(MedicionImposible, match="productos distintos"):
+            process_image_mosaico(rutas, piezas, date(2024, 1, 1), "sintetico",
+                                  delete_files=False)
+
     def test_producto_pedido_distinto_al_del_archivo_es_medicion_imposible(self, tmp_path):
         coords = cuadrado(ESQUINA, 1.3)
         piezas = cobertura_por_cuadrante(coords, FORMA)

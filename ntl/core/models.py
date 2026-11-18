@@ -152,12 +152,12 @@ class MedicionResultado(BaseModel):
     Percentil_25_de_radianza: float = Field(..., description="25th percentile of the radiance")
     Percentil_50_de_radianza: float = Field(..., description="50th percentile of the radiance")
     Percentil_75_de_radianza: float = Field(..., description="75th percentile of the radiance")
-    Producto: Literal["VNP46A2", "VJ146A2"] = Field(
+    Producto: Literal["VNP46A2", "VJ146A2", "VJ246A2"] = Field(
         ...,
         description=(
             "Black Marble product the radiance came from, as declared by the HDF5 "
-            "file (ShortName): VNP46A2 (Suomi NPP, ends 2026-11-02) or VJ146A2 "
-            "(NOAA-20). Both are BRDF/lunar-corrected with per-pixel quality "
+            "file (ShortName): VNP46A2 (Suomi NPP, ends 2026-11-02), VJ146A2 "
+            "(NOAA-20) or VJ246A2 (NOAA-21). All are BRDF/lunar-corrected with per-pixel quality "
             "flags, but they are NOT interchangeable without calibration: do not "
             "splice series from different products. Series produced before this "
             "became mandatory used raw at-sensor radiance (VNP46A1) and their "
