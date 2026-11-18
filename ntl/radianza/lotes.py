@@ -16,7 +16,7 @@ from ..core.utils import normalize_municipio, parse_date, load_coord_data
 from ..core.downloader import (buscar_archivo_async, bajar_archivo_async,
                                iniciar_corrida, terminar_corrida)
 from ..core.productos import obtener_producto
-from .extraccion import process_image_mosaico
+from .extraccion import olvidar_lectura, process_image_mosaico
 from ..core.models import MedicionResultado
 
 def chunk_list(lst, chunk_size):
@@ -174,6 +174,10 @@ class SatelliteImagesAsync:
         tarea = self._vuelo.pop(cache_key, None)
         if tarea is not None and not tarea.done():
             tarea.cancel()
+        # La imagen descomprimida que compartían los municipios de la fecha se
+        # suelta junto con el archivo: si no, quedaría en memoria hasta que el
+        # tope LRU la empujara fuera.
+        olvidar_lectura(ruta)
         try:
             if ruta and os.path.exists(ruta):
                 os.remove(ruta)
