@@ -392,6 +392,35 @@ los reintentos.
 Cada corrida descarga a su propio subdirectorio `NTL_TEMP_DIR/run_<uuid>` y lo borra
 al terminar, así que dos corridas con el mismo `NTL_TEMP_DIR` no se pisan.
 
+### Descarga parcial (solo las filas que se usan)
+
+Con `NTL_DESCARGA_PARCIAL=1` no se baja el gránulo entero. `ntl.core.rangos` abre
+el HDF5 en LAADS con peticiones HTTP `Range` y escribe a disco un HDF5 *delgado*:
+misma estructura, metadatos y forma, pero con datos solo en las filas del
+rectángulo de cada municipio. El resto del flujo no cambia, y el resultado es
+idéntico al del archivo completo, matrices incluidas.
+
+Para las alcaldías de la CDMX, Oaxaca y Monterrey se baja ~15% de los bytes. Esto
+se validó en 8 fechas de 2012 a 2026, de punta a punta y contra un `ingest` hecho
+con archivos completos.
+
+| Variable | Por omisión | Qué hace |
+|---|---|---|
+| `NTL_DESCARGA_PARCIAL` | `0` | `1` activa la descarga parcial |
+| `NTL_BLOQUE_RANGO_KIB` | 64 | Tamaño de cada bloque pedido. Más chico = menos bytes de más y más peticiones (~20 por cuadrante con 64) |
+
+- **Si el servidor ignora el `Range`,** se baja el archivo entero.
+- **Errores de credenciales:** en este modo, un 401 aislado se reintenta y solo dos
+  seguidos se toman como `CredencialesInvalidas`, porque LAADS ha dado 401 pasajeros
+  con un token vigente.
+- **Para ir más rápido, usa más procesos y no más descargas simultáneas:** h5py lee
+  bajo un candado global por proceso, así que las peticiones de un mismo proceso
+  avanzan de una en una. Para una descarga histórica grande, reparte el rango de
+  fechas entre varios procesos (p. ej. uno por año). Así se bajó VNP46A2 completo
+  a ~30 fechas por minuto.
+- **El archivo delgado lleva el atributo raíz `ntl_filas_parciales`:** no es un
+  gránulo completo y no debe usarse como tal fuera de este flujo.
+
 ---
 
 ## Notas
