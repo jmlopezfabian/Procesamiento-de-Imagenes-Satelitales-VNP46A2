@@ -9,14 +9,15 @@ from typing import Callable
 
 import pandas as pd
 
+from ..core import config
 from ..core.config import (MAX_FECHAS_CONCURRENTES, PIXELES_MUNICIPIOS,
                            TEMP_DIR, data_path, temp_path)
 from ..core.errores import CredencialesInvalidas
 from ..core.utils import normalize_municipio, parse_date, load_coord_data
-from ..core.downloader import (buscar_archivo_async, bajar_archivo_async,
+from ..core.downloader import (buscar_archivo_async, bajar_archivo_async, bajar_franjas_async,
                                iniciar_corrida, terminar_corrida)
 from ..core.productos import obtener_producto
-from .extraccion import olvidar_lectura, process_image_mosaico
+from .extraccion import filas_necesarias, olvidar_lectura, process_image_mosaico
 from ..core.models import MedicionResultado
 
 def chunk_list(lst, chunk_size):
@@ -131,7 +132,15 @@ class SatelliteImagesAsync:
 
         save_path = self._ruta_temp(f"{date_obj}_{self.producto.nombre}_{cuadrante}.h5")
         print(f"📥 Descargando: {h5_url} -> {save_path}")
-        downloaded_path = await bajar_archivo_async(session, h5_url, save_path)
+        if config.DESCARGA_PARCIAL:
+            # Solo las filas que usan los municipios de esta instancia (ver
+            # core.rangos); el resto del flujo abre el HDF5 delgado como siempre.
+            def filas_para(forma, cuadrante=cuadrante):
+                return filas_necesarias(
+                    [c.piezas for c in self.coord_data_dict.values()], cuadrante, forma)
+            downloaded_path = await bajar_franjas_async(session, h5_url, save_path, filas_para)
+        else:
+            downloaded_path = await bajar_archivo_async(session, h5_url, save_path)
 
         if downloaded_path:
             self.cache_h5_files[cache_key] = downloaded_path

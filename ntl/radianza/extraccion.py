@@ -647,3 +647,36 @@ def process_image(downloaded_path, pesos, date_obj, municipio, delete_file=True,
         delete_files=delete_file,
     )
 
+
+def filas_necesarias(piezas_por_municipio, cuadrante: str | None, forma: tuple[int, int]
+                     ) -> list[tuple[int, int]]:
+    """
+    Filas de `cuadrante` (intervalos [a, b)) que hacen falta para procesar a
+    todos los municipios, con las mismas reglas que `process_image_mosaico`.
+
+    No basta con las filas donde hay píxeles del municipio: el recorte que se
+    guarda (`Matriz_de_radianza`, `Matriz_rellenada`) es el bounding box
+    entero, en el marco del cuadrante de referencia, así que se pide cada fila
+    de ese rectángulo que caiga en este cuadrante. Es lo que usa la descarga
+    parcial (core.rangos) para decidir qué bajar.
+    """
+    from ..core.rangos import unir_intervalos
+
+    alto, ancho = forma
+    intervalos = []
+    for piezas in piezas_por_municipio:
+        norm = _normalizar_piezas(piezas)
+        if cuadrante not in norm:
+            continue
+        desplazamientos = _desplazamientos(list(norm), forma)
+        ys = [y + desplazamientos[c][1]
+              for c, pesos in norm.items()
+              for x, y, _ in pesos
+              if 0 <= y < alto and 0 <= x < ancho]
+        if not ys:
+            continue
+        dy = desplazamientos[cuadrante][1]
+        a, b = max(0, min(ys) - dy), min(alto, max(ys) - dy + 1)
+        if a < b:
+            intervalos.append((a, b))
+    return unir_intervalos(intervalos)

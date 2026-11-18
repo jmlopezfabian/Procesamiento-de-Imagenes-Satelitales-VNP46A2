@@ -36,6 +36,7 @@ from .config import CHUNK_SIZE, HEADERS
 from .errores import CredencialesInvalidas, DescargaFallida
 from .limitador import obtener_limitador
 from .por_loop import estado_del_loop
+from . import rangos
 from .productos import obtener_producto
 
 FIRMA_HDF5 = b"\x89HDF\r\n\x1a\n"
@@ -780,3 +781,28 @@ async def bajar_archivo_async(session, url, path, max_retries=None, delay=None):
             raise
 
     return await _con_reintentos(intento, f"Descarga {url}", max_intentos, base, pesada=True)
+
+
+async def bajar_franjas_async(session, url, path, filas_para):
+    """
+    Descarga parcial (core.rangos) con el mismo contrato que `bajar_archivo_async`.
+
+    Devuelve `path` con un HDF5 delgado, o None si el gránulo no existe. Ocupa un
+    lugar de descarga pesada y una ficha del limitador por gránulo, como la
+    descarga completa. Si el archivo no admite lectura parcial —el servidor
+    ignora el Range o la forma no es la esperada— baja el archivo entero.
+    """
+    limitador = obtener_limitador()
+    try:
+        async with limitador.descarga():
+            await limitador.esperar_turno()
+            stats = await asyncio.to_thread(rangos.bajar_franjas, url, path, filas_para)
+    except rangos._NoParcial as e:
+        print(f"Descarga parcial no aplica a {url} ({e}); se baja el archivo entero")
+        return await bajar_archivo_async(session, url, path)
+    if stats is None:
+        print(f"{url}: HTTP 404/410; no se reintenta")
+        return None
+    print(f"Descarga parcial completada: {path} ({stats['bytes']} de {stats['tamano']} "
+          f"bytes en {stats['peticiones']} peticiones; filas {stats['filas']})")
+    return path

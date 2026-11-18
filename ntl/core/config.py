@@ -141,6 +141,17 @@ if not (math.isfinite(MAX_PETICIONES_POR_SEG) and MAX_PETICIONES_POR_SEG >= 0):
         f"NTL_MAX_PETICIONES_POR_SEG={MAX_PETICIONES_POR_SEG} no es válido: usa un "
         f"número finito positivo, o 0 para no limitar el ritmo")
 MAX_INTENTOS = max(1, int(_primera_definida("NTL_MAX_INTENTOS") or 5))
+
+# Descarga parcial (ver core.rangos): bajar solo las filas del gránulo que usan
+# los municipios, con peticiones HTTP Range, en vez del archivo entero. Con las
+# alcaldías de la CDMX y Oaxaca son ~5 de ~19 MB por cuadrante. Desactivada por
+# omisión; NTL_DESCARGA_PARCIAL=1 la enciende. Si el servidor no acepta rangos,
+# se baja el archivo entero como siempre.
+DESCARGA_PARCIAL = (_primera_definida("NTL_DESCARGA_PARCIAL") or "0").strip().lower() in (
+    "1", "true", "si", "sí", "yes")
+# Tamaño del bloque que se pide por rango (KiB). Más chico = menos bytes de más
+# y más peticiones; 64 KiB da ~18 peticiones y ~5 MB por cuadrante de México.
+BLOQUE_RANGO = max(4, int(_primera_definida("NTL_BLOQUE_RANGO_KIB") or 64)) * 1024
 BACKOFF_BASE = float(_primera_definida("NTL_BACKOFF_BASE") or 2)
 BACKOFF_TOPE = float(_primera_definida("NTL_BACKOFF_TOPE") or 120)
 # Cuánto se recuerda que el listado de un día respondió 404 (s). Un día aún no
