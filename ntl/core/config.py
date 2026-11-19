@@ -26,7 +26,7 @@ def _primera_definida(*nombres: str) -> str | None:
 # Producto de Black Marble del que se lee la radianza.
 #
 # Los productos soportados viven en `ntl.core.productos` (VNP46A2 de Suomi NPP,
-# que termina el 2026-11-02, y VJ146A2 de NOAA-20, vigente). Ambos son versiones
+# que termina el 2026-11-02; VJ146A2 de NOAA-20 y VJ246A2 de NOAA-21, vigentes). Todos son versiones
 # corregidas por reflectancia bidireccional lunar y atmósfera, con
 # Mandatory_Quality_Flag por píxel. Por omisión se usa VJ146A2; NTL_PRODUCTO lo
 # cambia. `PRODUCTO` se conserva por compatibilidad como el NOMBRE del producto
@@ -109,6 +109,9 @@ def temp_path(filename: str) -> Path:
 #
 #     pico ≈ MAX_FECHAS_CONCURRENTES × cuadrantes de la región × ~16 MB (tiles de México; el mayor del día ronda 30 MB)
 #
+# Y de memoria: cada cuadrante en vuelo se guarda descomprimido para compartirlo
+# entre los municipios de la fecha (~140 MB; ver radianza.extraccion).
+#
 # Sin este límite se lanzaba una tarea por fecha y todas descargaban a la vez:
 # un año de una región de dos cuadrantes son 730 gránulos simultáneos. El
 # parámetro `chunks` lo acotaba de rebote, pero existe para guardar progreso, no
@@ -141,6 +144,29 @@ if not (math.isfinite(MAX_PETICIONES_POR_SEG) and MAX_PETICIONES_POR_SEG >= 0):
         f"NTL_MAX_PETICIONES_POR_SEG={MAX_PETICIONES_POR_SEG} no es válido: usa un "
         f"número finito positivo, o 0 para no limitar el ritmo")
 MAX_INTENTOS = max(1, int(_primera_definida("NTL_MAX_INTENTOS") or 5))
+
+# Descarga parcial (ver core.rangos): bajar solo las filas del gránulo que usan
+# los municipios, con peticiones HTTP Range, en vez del archivo entero. Con las
+# alcaldías de la CDMX y Oaxaca son ~5 de ~19 MB por cuadrante. Desactivada por
+# omisión; NTL_DESCARGA_PARCIAL=1 la enciende. Si el servidor no acepta rangos,
+# se baja el archivo entero como siempre.
+_VERDADEROS = ("1", "true", "si", "sí", "yes", "on")
+_FALSOS = ("0", "false", "no", "off", "")
+_valor_parcial = (_primera_definida("NTL_DESCARGA_PARCIAL") or "0").strip().lower()
+if _valor_parcial not in _VERDADEROS + _FALSOS:
+    # Un valor que no se entiende no puede quedar apagado en silencio: quien
+    # escribió `NTL_DESCARGA_PARCIAL=enabled` bajaría archivos completos sin saberlo.
+    raise ValueError(
+        f"NTL_DESCARGA_PARCIAL={_valor_parcial!r} no es válido: usa 1 o 0 "
+        f"(también true/false, si/no, on/off)")
+DESCARGA_PARCIAL = _valor_parcial in _VERDADEROS
+# Tamaño del bloque que se pide por rango (KiB). Más chico = menos bytes de más
+# y más peticiones; 64 KiB da ~20 peticiones y ~5 MB por cuadrante de México.
+_valor_bloque = (_primera_definida("NTL_BLOQUE_RANGO_KIB") or "64").strip()
+if not (_valor_bloque.isascii() and _valor_bloque.isdigit()) or int(_valor_bloque) < 4:
+    raise ValueError(
+        f"NTL_BLOQUE_RANGO_KIB={_valor_bloque!r} no es válido: usa un entero de 4 o más (KiB)")
+BLOQUE_RANGO = int(_valor_bloque) * 1024
 BACKOFF_BASE = float(_primera_definida("NTL_BACKOFF_BASE") or 2)
 BACKOFF_TOPE = float(_primera_definida("NTL_BACKOFF_TOPE") or 120)
 # Cuánto se recuerda que el listado de un día respondió 404 (s). Un día aún no

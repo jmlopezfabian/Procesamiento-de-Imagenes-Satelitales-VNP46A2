@@ -1,8 +1,9 @@
 """
-Procesamiento de imágenes satelitales Black Marble (VJ146A2 y VNP46A2).
+Procesamiento de imágenes satelitales Black Marble (VJ146A2, VJ246A2 y VNP46A2).
 
-El producto por omisión es VJ146A2 (NOAA-20), el único vigente: VNP46A2 (Suomi
-NPP) termina el 2026-11-02. Se cambia con NTL_PRODUCTO o con el argumento
+El producto por omisión es VJ146A2 (NOAA-20), el vigente de serie más larga;
+VJ246A2 (NOAA-21) también está vigente y VNP46A2 (Suomi NPP) termina el
+2026-11-02. Se cambia con NTL_PRODUCTO o con el argumento
 `producto`; no son intercambiables sin calibrar (ver `core.productos`).
 
 El paquete está dividido por responsabilidad, no por modelo de concurrencia:
@@ -18,6 +19,6 @@ asíncrono vive únicamente en `core.downloader`, que es donde importa.
 from .core.errores import CredencialesInvalidas
 from .core.models import CoordenadasPixeles, MedicionResultado
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 __all__ = ["CoordenadasPixeles", "CredencialesInvalidas", "MedicionResultado"]

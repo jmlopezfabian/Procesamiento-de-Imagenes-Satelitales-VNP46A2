@@ -2,10 +2,12 @@ import h5py
 import math
 import numpy as np
 import os
+import threading
+from collections import OrderedDict
 from datetime import date
 from typing import Any
 
-from ..core.config import IMAGE_PATH, find_image_path
+from ..core.config import IMAGE_PATH, MAX_FECHAS_CONCURRENTES, find_image_path
 from ..core.errores import MedicionImposible
 from ..core.lectura import leer_antiguedad, leer_radianza, leer_rellenada
 from ..core.metricas import metricas_ponderadas
@@ -294,6 +296,108 @@ def _crop_capa(capas, pesos_ref, desplazamientos, forma):
     return _crop_mosaico(presentes, pesos_ref, desplazamientos, forma)["radiance_matrix"]
 
 
+# --- Lecturas compartidas entre municipios -----------------------------------
+#
+# Un cuadrante sirve a muchos municipios en la misma fecha: h08v07 cubre las 16
+# alcaldías de la CDMX y Oaxaca. Antes cada municipio volvía a abrir el HDF5 y a
+# descomprimir sus capas completas (2400×2400, tres capas), así que una fecha
+# descomprimía la misma imagen 16 veces: el 98% del tiempo de procesamiento,
+# medido sobre un gránulo real de VNP46A2.
+#
+# La lectura se memoriza por identidad de archivo —ruta, inodo, tamaño y mtime
+# en ns—, no solo por ruta: si el archivo se reemplaza (otra descarga al mismo
+# nombre), la clave cambia y se lee de nuevo; nunca se sirve una imagen vieja.
+# Los arreglos se marcan de solo lectura porque los comparten varias llamadas.
+#
+# Quien borra el archivo debe llamar `olvidar_lectura(ruta)` (lo hacen
+# `process_image_mosaico` con delete_files y el borrado por contador de
+# `SatelliteImagesAsync`). El tope LRU es la red de seguridad para quien no lo
+# haga: cada entrada pesa ~140 MB (tres capas float64 de 2400×2400).
+
+_LECTURAS: "OrderedDict[tuple, Any]" = OrderedDict()
+_LECTURAS_LOCK = threading.Lock()
+# Cuántas veces se olvidó cada ruta. Una lectura que empezó antes de un olvido
+# no se guarda al terminar: si no, un hilo que seguía leyendo cuando la fecha se
+# abortó reinsertaba ~140 MB de un archivo ya borrado.
+_OLVIDOS: dict[str, int] = {}
+# Lecturas en curso por ruta: `_OLVIDOS` solo hace falta mientras hay alguna,
+# y se limpia cuando termina la última (si no, crecería una entrada por archivo
+# en un proceso largo).
+_EN_VUELO: dict[str, int] = {}
+# Dos cuadrantes por fecha en vuelo, que es lo que usan las regiones actuales
+# (CDMX y Oaxaca en h08v07, Monterrey en h07v06). Una región de más cuadrantes
+# por fecha excede el tope y vuelve a descomprimir: no da un resultado distinto,
+# pero pierde la ganancia. Memoria: ~140 MB por entrada, ~1.1 GB con el valor
+# por omisión de MAX_FECHAS_CONCURRENTES (4).
+MAX_LECTURAS_EN_MEMORIA = max(4, 2 * MAX_FECHAS_CONCURRENTES)
+
+
+def _identidad(ruta: str):
+    try:
+        st = os.stat(ruta)
+    except OSError:
+        return None
+    return (os.path.abspath(ruta), st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _solo_lectura(leido):
+    if leido is None:
+        return None
+    matriz, lectura = leido
+    for arr in (matriz, lectura.get("rellenada"), lectura.get("antiguedad")):
+        if isinstance(arr, np.ndarray):
+            arr.setflags(write=False)
+    return matriz, lectura
+
+
+def leer_cuadrante_compartido(ruta: str, cuadrante: str | None):
+    """`_leer_cuadrante` memorizado por archivo: se descomprime una vez por fecha."""
+    ident = _identidad(ruta)
+    if ident is None:
+        # No existe: que `_leer_cuadrante` lo diga, sin memorizar nada.
+        return _leer_cuadrante(ruta, cuadrante)
+    clave = (ident, cuadrante)
+    with _LECTURAS_LOCK:
+        if clave in _LECTURAS:
+            _LECTURAS.move_to_end(clave)
+            return _LECTURAS[clave]
+        olvidos = _OLVIDOS.get(ident[0], 0)
+        _EN_VUELO[ident[0]] = _EN_VUELO.get(ident[0], 0) + 1
+    try:
+        leido = _solo_lectura(_leer_cuadrante(ruta, cuadrante))
+    finally:
+        with _LECTURAS_LOCK:
+            olvidado = _OLVIDOS.get(ident[0], 0) != olvidos
+            _EN_VUELO[ident[0]] -= 1
+            if not _EN_VUELO[ident[0]]:
+                del _EN_VUELO[ident[0]]
+                _OLVIDOS.pop(ident[0], None)
+    if leido is None:
+        # Un fallo no se memoriza: puede ser pasajero (EMFILE, EIO) y el
+        # siguiente municipio debe poder reintentar, como antes de la memoria.
+        return None
+    with _LECTURAS_LOCK:
+        if olvidado:
+            return leido  # el archivo se olvidó mientras se leía: no se guarda
+        _LECTURAS[clave] = leido
+        _LECTURAS.move_to_end(clave)
+        while len(_LECTURAS) > MAX_LECTURAS_EN_MEMORIA:
+            _LECTURAS.popitem(last=False)
+    return leido
+
+
+def olvidar_lectura(ruta: str | None) -> None:
+    """Suelta de memoria las lecturas de un archivo (se llama al borrarlo)."""
+    if not ruta:
+        return
+    absoluta = os.path.abspath(ruta)
+    with _LECTURAS_LOCK:
+        if absoluta in _EN_VUELO:
+            _OLVIDOS[absoluta] = _OLVIDOS.get(absoluta, 0) + 1
+        for clave in [k for k in _LECTURAS if k[0][0] == absoluta]:
+            del _LECTURAS[clave]
+
+
 def _leer_cuadrante(ruta: str, cuadrante: str | None):
     """
     Las capas de un cuadrante, en unidades físicas y con NaN donde no hay medición.
@@ -394,7 +498,7 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
         productos_leidos: set[str] = set()
         for cuadrante in piezas_norm:
             ruta = rutas_por_cuadrante.get(cuadrante)
-            leido = _leer_cuadrante(ruta, cuadrante) if ruta else None
+            leido = leer_cuadrante_compartido(ruta, cuadrante) if ruta else None
             if leido is None:
                 continue
             matrices[cuadrante], lectura_cuadrante = leido
@@ -538,6 +642,7 @@ def process_image_mosaico(rutas_por_cuadrante, piezas, date_obj, municipio,
     finally:
         if delete_files:
             for ruta in set(r for r in rutas_por_cuadrante.values() if r):
+                olvidar_lectura(ruta)
                 try:
                     if os.path.exists(ruta):
                         os.remove(ruta)
@@ -572,3 +677,37 @@ def process_image(downloaded_path, pesos, date_obj, municipio, delete_file=True,
         municipio,
         delete_files=delete_file,
     )
+
+
+def filas_necesarias(piezas_por_municipio, cuadrante: str | None, forma: tuple[int, int]
+                     ) -> list[tuple[int, int]]:
+    """
+    Filas de `cuadrante` (intervalos [a, b)) que hacen falta para procesar a
+    todos los municipios, con las mismas reglas que `process_image_mosaico`.
+
+    No basta con las filas donde hay píxeles del municipio: el recorte que se
+    guarda (`Matriz_de_radianza`, `Matriz_rellenada`) es el bounding box
+    entero, en el marco del cuadrante de referencia, así que se pide cada fila
+    de ese rectángulo que caiga en este cuadrante. Es lo que usa la descarga
+    parcial (core.rangos) para decidir qué bajar.
+    """
+    from ..core.rangos import unir_intervalos
+
+    alto, ancho = forma
+    intervalos = []
+    for piezas in piezas_por_municipio:
+        norm = _normalizar_piezas(piezas)
+        if cuadrante not in norm:
+            continue
+        desplazamientos = _desplazamientos(list(norm), forma)
+        ys = [y + desplazamientos[c][1]
+              for c, pesos in norm.items()
+              for x, y, _ in pesos
+              if 0 <= y < alto and 0 <= x < ancho]
+        if not ys:
+            continue
+        dy = desplazamientos[cuadrante][1]
+        a, b = max(0, min(ys) - dy), min(alto, max(ys) - dy + 1)
+        if a < b:
+            intervalos.append((a, b))
+    return unir_intervalos(intervalos)
