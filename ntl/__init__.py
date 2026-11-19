@@ -19,6 +19,6 @@ asíncrono vive únicamente en `core.downloader`, que es donde importa.
 from .core.errores import CredencialesInvalidas
 from .core.models import CoordenadasPixeles, MedicionResultado
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 __all__ = ["CoordenadasPixeles", "CredencialesInvalidas", "MedicionResultado"]
