@@ -101,6 +101,7 @@ class TestMedicionResultado:
         with pytest.raises(ValidationError):
             MedicionResultado(Producto="VNP46A1", **base)
         assert MedicionResultado(Producto="VJ146A2", **base).Producto == "VJ146A2"
+        assert MedicionResultado(Producto="VJ246A2", **base).Producto == "VJ246A2"
 
     def test_missing_required_field_raises(self):
         with pytest.raises(ValidationError):

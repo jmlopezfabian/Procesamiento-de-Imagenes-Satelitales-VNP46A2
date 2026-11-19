@@ -21,6 +21,7 @@ import contextlib
 import email.utils
 import os
 import random
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -36,6 +37,7 @@ from .config import CHUNK_SIZE, HEADERS
 from .errores import CredencialesInvalidas, DescargaFallida
 from .limitador import obtener_limitador
 from .por_loop import estado_del_loop
+from . import rangos
 from .productos import obtener_producto
 
 FIRMA_HDF5 = b"\x89HDF\r\n\x1a\n"
@@ -780,3 +782,65 @@ async def bajar_archivo_async(session, url, path, max_retries=None, delay=None):
             raise
 
     return await _con_reintentos(intento, f"Descarga {url}", max_intentos, base, pesada=True)
+
+
+async def bajar_franjas_async(session, url, path, filas_para):
+    """
+    Descarga parcial (core.rangos) con el mismo contrato que `bajar_archivo_async`.
+
+    Devuelve `path` con un HDF5 delgado, o None si el gránulo no existe. Ocupa un
+    lugar de descarga pesada y una ficha del limitador por gránulo, como la
+    descarga completa. Si el archivo no admite lectura parcial —el servidor
+    ignora el Range o la forma no es la esperada— baja el archivo entero.
+    """
+    limitador = obtener_limitador()
+    loop = asyncio.get_running_loop()
+    cancelado = threading.Event()
+
+    def penalizar(segundos):
+        # Llega desde el hilo: el limitador vive en el loop. Si el loop ya
+        # cerró no hay a quién frenar.
+        try:
+            loop.call_soon_threadsafe(limitador.penalizar, segundos)
+        except RuntimeError:
+            pass
+
+    try:
+        async with limitador.descarga():
+            await limitador.esperar_turno()
+            hilo = asyncio.ensure_future(asyncio.to_thread(
+                rangos.bajar_franjas, url, path, filas_para, None, cancelado, penalizar))
+            try:
+                stats = await asyncio.shield(hilo)
+            except asyncio.CancelledError:
+                # Un hilo no se puede cancelar: se le avisa y se espera a que
+                # suelte (a lo sumo un timeout de lectura) antes de liberar el
+                # lugar de descarga, para no pasarse del límite ni dejarle
+                # escribir en un directorio de corrida ya borrado.
+                cancelado.set()
+                # Hasta que el hilo termine, aunque llegue otra cancelación:
+                # salir antes soltaría el lugar con el hilo todavía bajando.
+                while not hilo.done():
+                    try:
+                        await asyncio.wait({hilo})
+                    except asyncio.CancelledError:
+                        pass
+                if not hilo.cancelled() and hilo.exception() is None and hilo.result():
+                    # Terminó justo antes del aviso y ya renombró: nadie lo va a
+                    # usar ni a borrar (no quedó en el caché del lote). Solo si
+                    # sigue siendo el suyo: otra descarga pudo dejar otro ahí.
+                    try:
+                        if os.stat(path).st_ino == hilo.result()["inodo"]:
+                            _borrar(path)
+                    except OSError:
+                        pass
+                raise
+    except rangos._NoParcial as e:
+        print(f"Descarga parcial no aplica a {url} ({e}); se baja el archivo entero")
+        return await bajar_archivo_async(session, url, path)
+    if stats is None:
+        print(f"{url}: HTTP 404/410; no se reintenta")
+        return None
+    print(f"Descarga parcial completada: {path} ({stats['bytes']} de {stats['tamano']} "
+          f"bytes en {stats['peticiones']} peticiones; filas {stats['filas']})")
+    return path

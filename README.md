@@ -1,7 +1,7 @@
 ## Procesamiento de Imágenes Satelitales Black Marble
 
 Proyecto para procesar imágenes satelitales de luminosidad nocturna de Black Marble (NASA):
-**VJ146A2** (NOAA-20, por omisión) o **VNP46A2** (Suomi NPP, hasta el 2026-11-02) y obtener métricas de radianza por municipio.
+**VJ146A2** (NOAA-20, por omisión), **VJ246A2** (NOAA-21) o **VNP46A2** (Suomi NPP, hasta el 2026-11-02) y obtener métricas de radianza por municipio.
 
 Es una **librería**: el tablero y el servicio que la usan a diario viven en
 daily-ntl. Ver "Dónde vive la aplicación".
@@ -100,11 +100,12 @@ Se leen productos diarios de Black Marble corregidos por BRDF lunar y atmósfera
 | Producto | Satélite | Cobertura | |
 |---|---|---|---|
 | `VNP46A2` | Suomi NPP | 2012-01-19 a **2026-11-02** (día 2026-306) | Suomi NPP dejó de entregar datos el 2 de noviembre de 2026 |
-| `VJ146A2` | NOAA-20 (JPSS-1) | desde 2018-01-05, vigente | **Por omisión**: el único que sigue publicando |
+| `VJ146A2` | NOAA-20 (JPSS-1) | desde 2018-01-05, vigente | **Por omisión**: la serie vigente más larga. Se publica ~14 días después |
+| `VJ246A2` | NOAA-21 (JPSS-2) | desde 2023-02-10, vigente | Se publica antes (~8 días) y cubre huecos de los otros dos |
 
-Ambos son colección 5200 y comparten algoritmo, retícula y formato HDF5. El producto de
+Los tres son colección 5200 y comparten algoritmo, retícula y formato HDF5. El producto de
 cada registro sale del atributo raíz `ShortName` del archivo, y `Producto` lo lleva
-(`"VNP46A2"` o `"VJ146A2"`). Para elegir otro:
+(`"VNP46A2"`, `"VJ146A2"` o `"VJ246A2"`). Para elegir otro:
 
 - `NTL_PRODUCTO=VNP46A2` en el entorno (o `.env`) cambia el valor por omisión;
 - `SatelliteImagesAsync(municipios, producto="VNP46A2")` y
@@ -114,14 +115,16 @@ Una fecha fuera de la vigencia del producto no se pide a NASA: en `SatelliteImag
 queda en `fallos` (tipo `ProductoFueraDeRango`, con el motivo) y en modo `estricto` lanza
 `ValueError`. La librería nunca elige el producto según la fecha por su cuenta.
 
-> **Advertencia de calibración.** Los dos productos **no son intercambiables sin
-> calibrar**. Una sola noche, sobre CDMX: VJ146A2 dio ~16-23% más que VNP46A2 en píxeles
+> **Advertencia de calibración.** Los productos **no son intercambiables sin
+> calibrar**, tampoco los dos NOAA entre sí (2026-10-20, Cuauhtémoc despejado: VJ246A2
+> 140.7 contra VJ146A2 142.4 nW/(cm² sr); una noche no es calibración). Una sola noche, sobre CDMX: VJ146A2 dio ~16-23% más que VNP46A2 en píxeles
 > de calidad 0, y en el tile completo ~17-27% menos. Es una observación aislada, no una
 > calibración: solo indica que hace falta calibrar en el traslape 2018-2026 antes de
-> empalmar una serie de VNP46A2 con una de VJ146A2. Hasta entonces, no las concatenes.
+> empalmar una serie de VNP46A2 con una de VJ146A2 (o VJ146A2 con VJ246A2, en su traslape
+> desde 2023). Hasta entonces, no concatenes series de productos distintos.
 
 VNP46A1 —radianza cruda al sensor— sigue fuera a propósito: un archivo cuyo `ShortName` no
-sea VNP46A2 o VJ146A2 se rechaza.
+sea VNP46A2, VJ146A2 o VJ246A2 se rechaza.
 
 VNP46A1 no trae ninguna bandera que
 permita descartar una observación inservible: una noche completamente nublada produce un
@@ -389,6 +392,35 @@ los reintentos.
 
 Cada corrida descarga a su propio subdirectorio `NTL_TEMP_DIR/run_<uuid>` y lo borra
 al terminar, así que dos corridas con el mismo `NTL_TEMP_DIR` no se pisan.
+
+### Descarga parcial (solo las filas que se usan)
+
+Con `NTL_DESCARGA_PARCIAL=1` no se baja el gránulo entero. `ntl.core.rangos` abre
+el HDF5 en LAADS con peticiones HTTP `Range` y escribe a disco un HDF5 *delgado*:
+misma estructura, metadatos y forma, pero con datos solo en las filas del
+rectángulo de cada municipio. El resto del flujo no cambia, y el resultado es
+idéntico al del archivo completo, matrices incluidas.
+
+Para las alcaldías de la CDMX, Oaxaca y Monterrey se baja ~15% de los bytes. Esto
+se validó en 8 fechas de 2012 a 2026, de punta a punta y contra un `ingest` hecho
+con archivos completos.
+
+| Variable | Por omisión | Qué hace |
+|---|---|---|
+| `NTL_DESCARGA_PARCIAL` | `0` | `1` activa la descarga parcial (también `true`/`si`/`on`). Un valor no reconocido falla al importar |
+| `NTL_BLOQUE_RANGO_KIB` | 64 | Tamaño de cada bloque pedido. Más chico = menos bytes de más y más peticiones (~20 por cuadrante con 64). Mínimo 4 |
+
+- **Si el servidor ignora el `Range`,** se baja el archivo entero.
+- **Errores de credenciales:** en este modo, un 401 aislado se reintenta y solo dos
+  seguidos se toman como `CredencialesInvalidas`, porque LAADS ha dado 401 pasajeros
+  con un token vigente.
+- **Para ir más rápido, usa más procesos y no más descargas simultáneas:** h5py lee
+  bajo un candado global por proceso, así que las peticiones de un mismo proceso
+  avanzan de una en una. Para una descarga histórica grande, reparte el rango de
+  fechas entre varios procesos (p. ej. uno por año). Así se bajó VNP46A2 completo
+  a ~30 fechas por minuto.
+- **El archivo delgado lleva el atributo raíz `ntl_filas_parciales`:** no es un
+  gránulo completo y no debe usarse como tal fuera de este flujo.
 
 ---
 

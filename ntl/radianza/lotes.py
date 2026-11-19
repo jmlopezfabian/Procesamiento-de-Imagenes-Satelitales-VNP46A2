@@ -9,14 +9,15 @@ from typing import Callable
 
 import pandas as pd
 
+from ..core import config
 from ..core.config import (MAX_FECHAS_CONCURRENTES, PIXELES_MUNICIPIOS,
                            TEMP_DIR, data_path, temp_path)
 from ..core.errores import CredencialesInvalidas
 from ..core.utils import normalize_municipio, parse_date, load_coord_data
-from ..core.downloader import (buscar_archivo_async, bajar_archivo_async,
+from ..core.downloader import (buscar_archivo_async, bajar_archivo_async, bajar_franjas_async,
                                iniciar_corrida, terminar_corrida)
 from ..core.productos import obtener_producto
-from .extraccion import process_image_mosaico
+from .extraccion import filas_necesarias, olvidar_lectura, process_image_mosaico
 from ..core.models import MedicionResultado
 
 def chunk_list(lst, chunk_size):
@@ -84,7 +85,7 @@ class SatelliteImagesAsync:
         
         Args:
             municipios: Lista de nombres de municipios o string único
-            producto: nombre o `Producto` de Black Marble (VNP46A2, VJ146A2).
+            producto: nombre o `Producto` de Black Marble (VNP46A2, VJ146A2, VJ246A2).
                 None = el por omisión (NTL_PRODUCTO, o VJ146A2). Se valida aquí.
                 Una instancia usa un solo producto: nunca se mezclan ni se
                 elige uno por fecha (ver core.productos).
@@ -129,9 +130,24 @@ class SatelliteImagesAsync:
             print(f"❌ No se encontró archivo H5 para: {year}-{day} ({cuadrante})")
             return None
 
-        save_path = self._ruta_temp(f"{date_obj}_{self.producto.nombre}_{cuadrante}.h5")
+        nombre = f"{date_obj}_{self.producto.nombre}_{cuadrante}.h5"
+        if config.DESCARGA_PARCIAL and self._dir_temp is None:
+            # Sin directorio propio de corrida la ruta es compartida entre
+            # instancias y procesos. Con el archivo completo daba igual (es el
+            # mismo contenido), pero el delgado solo trae las filas de ESTOS
+            # municipios: otra instancia que lo pisara dejaría a los suyos sin datos.
+            nombre = f"{date_obj}_{self.producto.nombre}_{cuadrante}_{uuid.uuid4().hex[:12]}.h5"
+        save_path = self._ruta_temp(nombre)
         print(f"📥 Descargando: {h5_url} -> {save_path}")
-        downloaded_path = await bajar_archivo_async(session, h5_url, save_path)
+        if config.DESCARGA_PARCIAL:
+            # Solo las filas que usan los municipios de esta instancia (ver
+            # core.rangos); el resto del flujo abre el HDF5 delgado como siempre.
+            def filas_para(forma, cuadrante=cuadrante):
+                return filas_necesarias(
+                    [c.piezas for c in self.coord_data_dict.values()], cuadrante, forma)
+            downloaded_path = await bajar_franjas_async(session, h5_url, save_path, filas_para)
+        else:
+            downloaded_path = await bajar_archivo_async(session, h5_url, save_path)
 
         if downloaded_path:
             self.cache_h5_files[cache_key] = downloaded_path
@@ -174,6 +190,10 @@ class SatelliteImagesAsync:
         tarea = self._vuelo.pop(cache_key, None)
         if tarea is not None and not tarea.done():
             tarea.cancel()
+        # La imagen descomprimida que compartían los municipios de la fecha se
+        # suelta junto con el archivo: si no, quedaría en memoria hasta que el
+        # tope LRU la empujara fuera.
+        olvidar_lectura(ruta)
         try:
             if ruta and os.path.exists(ruta):
                 os.remove(ruta)

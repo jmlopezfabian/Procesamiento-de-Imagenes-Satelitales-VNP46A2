@@ -13,10 +13,12 @@ def sin_env(monkeypatch):
 
 
 def test_registro():
-    assert set(PRODUCTOS) == {"VNP46A2", "VJ146A2"}
-    vnp, vj = PRODUCTOS["VNP46A2"], PRODUCTOS["VJ146A2"]
+    assert set(PRODUCTOS) == {"VNP46A2", "VJ146A2", "VJ246A2"}
+    vnp, vj, vj2 = PRODUCTOS["VNP46A2"], PRODUCTOS["VJ146A2"], PRODUCTOS["VJ246A2"]
     assert (vnp.inicio, vnp.fin, vnp.coleccion) == (date(2012, 1, 19), date(2026, 11, 2), 5200)
     assert (vj.inicio, vj.fin, vj.plataforma) == (date(2018, 1, 5), None, "JPSS-1")
+    assert (vj2.inicio, vj2.fin, vj2.plataforma, vj2.satelite, vj2.coleccion) == (
+        date(2023, 2, 10), None, "JPSS-2", "NOAA-21", 5200)
 
 
 def test_es_inmutable():
@@ -32,6 +34,8 @@ def test_el_por_omision_es_vj146a2():
 def test_ntl_producto_cambia_el_por_omision(monkeypatch):
     monkeypatch.setenv("NTL_PRODUCTO", "VNP46A2")
     assert obtener_producto(None).nombre == "VNP46A2"
+    monkeypatch.setenv("NTL_PRODUCTO", "vj246a2")
+    assert obtener_producto(None) is PRODUCTOS["VJ246A2"]
 
 
 def test_ntl_producto_invalido_falla_con_mensaje_claro(monkeypatch):
@@ -60,13 +64,23 @@ def test_url_listado():
     assert PRODUCTOS["VJ146A2"].url_listado(2026, 5) == (
         "https://ladsweb.modaps.eosdis.nasa.gov/api/v2/content/details/allData/"
         "5200/VJ146A2/2026/005/")
+    assert PRODUCTOS["VJ246A2"].url_listado(2026, 312) == (
+        "https://ladsweb.modaps.eosdis.nasa.gov/api/v2/content/details/allData/"
+        "5200/VJ246A2/2026/312/")
 
 
 def test_vigencia():
     vnp, vj = PRODUCTOS["VNP46A2"], PRODUCTOS["VJ146A2"]
     assert vnp.motivo_fuera_de_rango(date(2026, 11, 2)) is None
-    assert "después de 2026-11-02; usar VJ146A2" in vnp.motivo_fuera_de_rango(date(2026, 11, 3))
+    assert "después de 2026-11-02; usar VJ146A2 o VJ246A2" in vnp.motivo_fuera_de_rango(date(2026, 11, 3))
     assert "antes de 2012-01-19" in vnp.motivo_fuera_de_rango(date(2012, 1, 18))
     assert vj.motivo_fuera_de_rango(date(2018, 1, 4)) is not None
     assert vj.motivo_fuera_de_rango(date(2018, 1, 5)) is None
     assert vj.motivo_fuera_de_rango(date(2040, 1, 1)) is None
+
+
+def test_vigencia_vj246a2():
+    vj2 = PRODUCTOS["VJ246A2"]
+    assert "antes de 2023-02-10" in vj2.motivo_fuera_de_rango(date(2023, 2, 9))
+    assert vj2.motivo_fuera_de_rango(date(2023, 2, 10)) is None
+    assert vj2.motivo_fuera_de_rango(date(2040, 1, 1)) is None

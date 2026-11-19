@@ -165,7 +165,7 @@ class TestVNP46A2:
 class TestProductoDelArchivo:
     """El producto sale del atributo raíz ShortName, no de la configuración."""
 
-    @pytest.mark.parametrize("corto", [b"VNP46A2", b"VJ146A2", "VJ146A2"])
+    @pytest.mark.parametrize("corto", [b"VNP46A2", b"VJ146A2", "VJ146A2", b"VJ246A2"])
     def test_lo_toma_del_archivo(self, tmp_path, corto):
         ruta = _hdf5(tmp_path, [[10, 20]], producto=corto)
         with h5py.File(ruta) as f:
